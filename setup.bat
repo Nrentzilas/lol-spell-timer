@@ -40,8 +40,15 @@ if not exist "requirements.txt" (
 )
 
 :: 5. Install dependencies from file
-echo [INFO] Installing dependencies from requirements.txt...
-pip install -r requirements.txt
+:: requirements-dev.txt pulls in requirements.txt plus PyInstaller and pytest,
+:: which the build and test steps need.
+if exist "requirements-dev.txt" (
+    echo [INFO] Installing dependencies from requirements-dev.txt...
+    pip install -r requirements-dev.txt
+) else (
+    echo [INFO] Installing dependencies from requirements.txt...
+    pip install -r requirements.txt
+)
 
 if %errorlevel% equ 0 (
     echo.

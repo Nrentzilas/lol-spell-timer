@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Build and test only -- not needed to run the app.
+pyinstaller>=6.0
+pytest>=8.0
