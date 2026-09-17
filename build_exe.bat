@@ -23,7 +23,7 @@ if exist "venv\Scripts\activate.bat" (
 
 :: 2. UPDATE ASSETS
 echo.
-echo [1/3] Checking for Asset Updates...
+echo [1/4] Checking for Asset Updates...
 python download_assets.py
 
 :: Check if asset download failed
@@ -34,16 +34,27 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
+:: 2b. RUN TESTS
+echo.
+echo [2/4] Running tests...
+python -m pytest tests -q
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] Tests failed! Aborting build.
+    pause
+    exit /b
+)
+
 :: 3. CLEANUP
 echo.
-echo [2/3] Cleaning up old build files...
+echo [3/4] Cleaning up old build files...
 rmdir /s /q build 2>nul
 rmdir /s /q dist 2>nul
 del /q *.spec 2>nul
 
 :: 4. BUILD EXE
 echo.
-echo [3/3] Building EXE with PyInstaller...
+echo [4/4] Building EXE with PyInstaller...
 echo Using Icon: ico\icon.ico
 echo Name: Spell Timer
 
@@ -55,6 +66,7 @@ pyinstaller --noconsole --onefile --name "Spell Timer" ^
  --hidden-import=pystray ^
  --hidden-import=PIL ^
  --hidden-import=urllib3 ^
+ --hidden-import=paho.mqtt.client ^
  main.py
 
 echo.
