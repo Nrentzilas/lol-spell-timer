@@ -2,22 +2,30 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
+import time
 import signal
 import ctypes
+import logging
 import threading
 import tkinter as tk
 from typing import Any, Dict, List, Optional, Tuple
-import requests
 import urllib3
 from PIL import Image, ImageTk, ImageDraw, ImageOps
-import pystray 
+import pystray
+import applog
+import sync
+import runes
+import hotkeys
+from config import Config, resource_path
+from gamedata import GameDataManager, GamePoller, SpellCooldowns, MATCH_ENDED
 
-# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- SINGLE INSTANCE CHECKER (MUTEX) ---
+log = logging.getLogger("app")
+
+
 class SingleInstanceChecker:
-    """Prevents multiple instances of the application."""
     def __init__(self, app_name="Global\\LoLSpellTimer_v9_5"):
         self.mutex_name = app_name
         self.mutex = None
@@ -31,199 +39,43 @@ class SingleInstanceChecker:
             return True
         return False
 
-# --- RESOURCE HELPER ---
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller."""
-    try:
-        base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
 
-# --- CONFIGURATION ---
-class Config:
-    if getattr(sys, 'frozen', False):
-        APP_DIR = os.path.dirname(sys.executable)
-    else:
-        APP_DIR = os.path.dirname(os.path.abspath(__file__))
-    CONFIG_FILE = os.path.join(APP_DIR, "config.json")
-
-    # === ITEM DATABASE (SUMMONER SPELL HASTE) ===
-    # Item ID -> Haste Value
-    ITEM_HASTE_MAP = {
-        3158: 10,    # Ionian Boots of Lucidity (SR/ARAM) -> 10 Haste
-        3171: 20,    # Crimson Lucidity (Ornn Upgrade) -> 20 Haste
-        223158: 10,  # Ionian Boots (Arena) -> 10 Haste
-    }
-
-    # === BASE SPELL TIMERS (Seconds) ===
-    SPELL_TIMERS = {
-        "summonerflash":    300,
-        "summonerteleport": 360,
-        "summonerheal":     240,
-        "summonerboost":    210, # Cleanse
-        "summonerexhaust":  210,
-        "summonerhaste":    210, # Ghost
-        "summonerbarrier":  180,
-        "summonerdot":      180, # Ignite
-        "summonersmite":    15,
-        "summonersnowball": 80,  # ARAM Mark
-        "summonerclarity":  240,
-        "summonermana":     240
-    }
-    
-    # === VISUALS ===
-    GLOBAL_OPACITY = 0.85   
-    ICON_SIZE = 38          
-    ROW_PADDING_Y = 6       
-    SHOW_SEPARATOR = True   
-    
-    COLOR_BG = "#091428"        
-    COLOR_BORDER = "#463714"    
-    COLOR_SEPARATOR = "#000000" 
-    COLOR_TEXT_ACTIVE = "#FFFFFF" 
-    COLOR_TEXT_OUTLINE = "#000000"
-    
-    COLOR_PINNED = "#8B0000"    # Dark Red
-    COLOR_HANDLE = "#666666"    # Grey
-    
-    FONT_FAMILY = "Arial"     
-    BASE_FONT_SIZE = 12         
-    
-    # API URLs
-    LCL_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
-    DDRAGON_VER_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
-    DDRAGON_DATA_URL = "https://ddragon.leagueoflegends.com/cdn/{}/data/en_US/summoner.json"
-    
-    CHECK_INTERVAL = 2000 # Check every 2 seconds
-
-# --- WIN32 API ---
 class Win32Utils:
     GWL_EXSTYLE = -20
     WS_EX_NOACTIVATE = 0x08000000
     WS_EX_TOPMOST = 0x00000008
+
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+
+    @staticmethod
+    def virtual_screen() -> Tuple[int, int, int, int]:
+        try:
+            get = ctypes.windll.user32.GetSystemMetrics
+            w = get(Win32Utils.SM_CXVIRTUALSCREEN)
+            h = get(Win32Utils.SM_CYVIRTUALSCREEN)
+            if w and h:
+                return (get(Win32Utils.SM_XVIRTUALSCREEN),
+                        get(Win32Utils.SM_YVIRTUALSCREEN), w, h)
+        except Exception:
+            pass
+        return (0, 0, 1920, 1080)
 
     @staticmethod
     def set_no_focus(hwnd: int):
         try:
             style = ctypes.windll.user32.GetWindowLongW(hwnd, Win32Utils.GWL_EXSTYLE)
             ctypes.windll.user32.SetWindowLongW(
-                hwnd, 
-                Win32Utils.GWL_EXSTYLE, 
+                hwnd,
+                Win32Utils.GWL_EXSTYLE,
                 style | Win32Utils.WS_EX_NOACTIVATE | Win32Utils.WS_EX_TOPMOST
             )
         except Exception:
             pass
 
-# --- DDRAGON MANAGER ---
-class DDragonManager:
-    @staticmethod
-    def update_timers():
-        print("[DDragon] Checking for updates...")
-        try:
-            v_resp = requests.get(Config.DDRAGON_VER_URL, timeout=2)
-            if v_resp.status_code != 200: return
-            version = v_resp.json()[0]
 
-            url = Config.DDRAGON_DATA_URL.format(version)
-            d_resp = requests.get(url, timeout=3)
-            if d_resp.status_code != 200: return
-            
-            data = d_resp.json().get("data", {})
-            for spell_id, info in data.items():
-                cooldowns = info.get("cooldown", [300])
-                cd = int(cooldowns[0])
-                key = spell_id.lower()
-                Config.SPELL_TIMERS[key] = cd
-        except Exception as e:
-            print(f"[DDragon] Update failed: {e}")
-
-# --- DATA MANAGER ---
-class GameDataManager:
-    @staticmethod
-    def fetch_data() -> Optional[Dict]:
-        try:
-            resp = requests.get(Config.LCL_URL, verify=False, timeout=0.5)
-            if resp.status_code == 200:
-                return resp.json()
-        except:
-            pass
-        return None
-
-    @staticmethod
-    def parse_enemies(data: Dict) -> List[Dict]:
-        if not data: return GameDataManager._get_dummy_data()
-        
-        all_players = data.get("allPlayers") or []
-        active_data = data.get("activePlayer", {})
-        my_name = active_data.get("summonerName")
-        
-        # --- FIX: Reliable Team Detection ---
-        # Look up the player in the full list to get the correct team (ORDER/CHAOS)
-        my_team = None
-        if my_name:
-            for p in all_players:
-                if p.get("summonerName") == my_name:
-                    my_team = p.get("team")
-                    break
-        
-        # Fallback default
-        if not my_team:
-            my_team = active_data.get("team", "ORDER")
-
-        enemies = []
-
-        for p in all_players:
-            if p.get("team") == my_team: continue
-            
-            raw_name = p.get("rawChampionName", "") or p.get("championName", "")
-            champ_name = raw_name.split("_")[-1] if "_" in raw_name else raw_name
-            spells = p.get("summonerSpells", {})
-            
-            # --- CALCULATE HASTE (ITEMS ONLY) ---
-            items = p.get("items", [])
-            current_haste = 0
-            
-            for item in items:
-                i_id = item.get("itemID", 0)
-                # Add haste if item is in our database
-                val = Config.ITEM_HASTE_MAP.get(i_id, 0)
-                current_haste += val
-            
-            enemies.append({
-                "champ": champ_name,
-                "spell1": GameDataManager._clean_spell_name(spells.get("summonerSpellOne", {}).get("rawDisplayName")),
-                "spell2": GameDataManager._clean_spell_name(spells.get("summonerSpellTwo", {}).get("rawDisplayName")),
-                "haste": current_haste 
-            })
-        return enemies
-
-    @staticmethod
-    def _clean_spell_name(raw: Optional[str]) -> str:
-        if not raw: return "Unknown"
-        raw_lower = raw.lower()
-        if "teleport" in raw_lower: return "SummonerTeleport"
-        if "smite" in raw_lower: return "SummonerSmite"
-        if "flash" in raw_lower: return "SummonerFlash"
-        if "ignite" in raw_lower or "dot" in raw_lower: return "SummonerDot"
-        if "barrier" in raw_lower: return "SummonerBarrier"
-        if "heal" in raw_lower: return "SummonerHeal"
-        if "exhaust" in raw_lower: return "SummonerExhaust"
-        if "cleanse" in raw_lower or "boost" in raw_lower: return "SummonerBoost"
-        if "ghost" in raw_lower or "haste" in raw_lower: return "SummonerHaste"
-        parts = raw.split("_")
-        for p in reversed(parts):
-            if p.startswith("Summoner") and p != "SummonerSpell": return p
-        return "Unknown"
-
-    @staticmethod
-    def _get_dummy_data():
-        return [
-            {"champ": "Darius", "spell1": "SummonerFlash", "spell2": "SummonerTeleport", "haste": 0},
-            {"champ": "Ornn", "spell1": "SummonerFlash", "spell2": "SummonerTeleport", "haste": 20},
-        ]
-
-# --- ASSET MANAGER ---
 class AssetManager:
     @staticmethod
     def load_icon(folder: str, name: str, size: Tuple[int, int], is_round: bool = False) -> ImageTk.PhotoImage:
@@ -248,57 +100,149 @@ class AssetManager:
 
     @staticmethod
     def create_dim_layer(size: Tuple[int, int]) -> ImageTk.PhotoImage:
-        img = Image.new("RGBA", size, (0, 0, 0, 180)) 
+        img = Image.new("RGBA", size, (0, 0, 0, 180))
         return ImageTk.PhotoImage(img)
 
-# --- SPELL TIMER WIDGET ---
+
+class ChampionIcon(tk.Canvas):
+    def __init__(self, parent, champ_name: str, app_ref, image):
+        super().__init__(parent, width=Config.ICON_SIZE, height=Config.ICON_SIZE,
+                         bg=Config.COLOR_BG, highlightthickness=0)
+        self.champ_name = champ_name
+        self.app_ref = app_ref
+        self.icon_img = image
+        self.create_image(0, 0, image=self.icon_img, anchor="nw")
+
+        s = Config.ICON_SIZE
+        self.badge_bg = self.create_oval(s - 16, s - 16, s - 1, s - 1,
+                                         fill=Config.COLOR_CI_BADGE,
+                                         outline=Config.COLOR_TEXT_OUTLINE,
+                                         state="hidden")
+        self.badge_txt = self.create_text(s - 8, s - 8, text="CI",
+                                          fill=Config.COLOR_TEXT_ACTIVE,
+                                          font=(Config.FONT_FAMILY, 6, "bold"),
+                                          state="hidden")
+
+        self.bind("<Control-Button-1>", self._toggle)
+        self.bind("<Control-Button-3>", self._toggle)
+
+    def _toggle(self, event):
+        self.app_ref.set_cosmic_insight(self.champ_name)
+        return "break"
+
+    def set_flag(self, on: bool):
+        state = "normal" if on else "hidden"
+        self.itemconfig(self.badge_bg, state=state)
+        self.itemconfig(self.badge_txt, state=state)
+
+
 class SpellTimerWidget(tk.Canvas):
     def __init__(self, parent, champ_name: str, spell_name: str, app_ref):
-        super().__init__(parent, width=Config.ICON_SIZE, height=Config.ICON_SIZE, 
+        super().__init__(parent, width=Config.ICON_SIZE, height=Config.ICON_SIZE,
                          bg=Config.COLOR_BG, highlightthickness=0)
         self.champ_name = champ_name
         self.spell_name = spell_name
-        self.app_ref = app_ref # Reference to main app to access cache
+        self.app_ref = app_ref
         self.is_active = False
         self.timer_job = None
+        self.remaining = 0
+        self._deadline = 0.0
+        self._base_cd = None
+        self._haste_used = 0
 
         self.icon_img = AssetManager.load_icon("spells", spell_name, (Config.ICON_SIZE, Config.ICON_SIZE))
         self.create_image(0, 0, image=self.icon_img, anchor="nw")
-        
+
         self.dim_img = AssetManager.create_dim_layer((Config.ICON_SIZE, Config.ICON_SIZE))
         self.dim_id = self.create_image(0, 0, image=self.dim_img, anchor="nw", state="hidden")
         self.text_id = self.create_text(Config.ICON_SIZE//2, Config.ICON_SIZE//2, text="", state="hidden")
 
-        self.bind("<Button-1>", self._on_left_click)  
-        self.bind("<Button-3>", self._on_right_click) 
+        self.warn_ring = self.create_rectangle(
+            1, 1, Config.ICON_SIZE - 1, Config.ICON_SIZE - 1,
+            outline=Config.COLOR_TEXT_WARN, width=2, state="hidden")
+
+        self.bind("<Button-1>", self._on_left_click)
+        self.bind("<Button-3>", self._on_right_click)
+        self.bind("<MouseWheel>", self._on_scroll)
 
     def _on_left_click(self, event):
+        self.arm()
+
+    def arm(self):
         if self.is_active: return
         key = self.spell_name.lower()
         base_cd = Config.SPELL_TIMERS.get(key, 300)
-        
-        # --- CALCULATE COOLDOWN WITH HASTE ---
-        # Get current haste from app cache (updated in background)
+
         current_haste = self.app_ref.get_haste(self.champ_name)
-        
-        # Formula: ReducedCooldown = Base * (100 / (100 + Haste))
+
         if current_haste > 0:
             final_cd = base_cd * (100 / (100 + current_haste))
             final_cd = int(final_cd)
-            print(f"[Timer] {self.champ_name} ({self.spell_name}): Base {base_cd}s -> Haste {current_haste} -> {final_cd}s")
+            log.info(f"{self.champ_name} ({self.spell_name}): Base {base_cd}s -> Haste {current_haste} -> {final_cd}s")
         else:
             final_cd = base_cd
 
+        self._base_cd = base_cd
+        self._haste_used = current_haste
         self._start_timer(final_cd)
 
     def _on_right_click(self, event):
         if self.is_active: self._reset()
 
-    def _start_timer(self, duration):
+    def _on_scroll(self, event):
+        if not self.is_active:
+            return "break"
+        self.nudge(Config.NUDGE_STEP if event.delta > 0 else -Config.NUDGE_STEP)
+        return "break"
+
+    def nudge(self, delta: int, broadcast: bool = True):
+        if not self.is_active:
+            return
+        new_rem = self.remaining + delta
+        if self._base_cd is not None:
+            new_rem = min(new_rem, self._apply_haste(self._haste_used))
+        self.set_remaining(new_rem, broadcast=broadcast)
+
+    def set_remaining(self, remaining: int, broadcast: bool = False):
+        if not self.is_active:
+            return
+        if self.timer_job:
+            self.after_cancel(self.timer_job)
+            self.timer_job = None
+        if remaining <= 0:
+            self._reset(broadcast=broadcast)
+            return
+        self._schedule(remaining)
+        if broadcast:
+            self.app_ref.broadcast_adjust(self.champ_name, self.spell_name, remaining)
+
+    def _start_timer(self, duration, broadcast: bool = True):
         self.is_active = True
+        if not broadcast:
+            self._base_cd = None
         self.itemconfig(self.dim_id, state="normal")
         self.itemconfig(self.text_id, state="normal")
-        self._tick(duration)
+        if broadcast:
+            self.app_ref.broadcast_start(self.champ_name, self.spell_name, duration)
+        self._schedule(duration)
+
+    def _apply_haste(self, haste: int) -> int:
+        return int(self._base_cd * (100 / (100 + haste))) if haste > 0 else self._base_cd
+
+    def recalculate(self, new_haste: int):
+        if not self.is_active or self._base_cd is None or new_haste == self._haste_used:
+            return
+        elapsed = self._apply_haste(self._haste_used) - self.remaining
+        self._haste_used = new_haste
+        new_remaining = self._apply_haste(new_haste) - elapsed
+
+        if self.timer_job:
+            self.after_cancel(self.timer_job)
+            self.timer_job = None
+        if new_remaining <= 0:
+            self._reset(broadcast=False)
+        else:
+            self._schedule(new_remaining)
 
     def _get_adaptive_font(self, text: str) -> Tuple[str, int, str]:
         length = len(text)
@@ -309,52 +253,100 @@ class SpellTimerWidget(tk.Canvas):
         elif length >= 5: size = Config.BASE_FONT_SIZE - 3
         return (Config.FONT_FAMILY, size, "bold")
 
-    def _draw_outlined_text(self, text):
+    def _draw_outlined_text(self, text, fill: str = Config.COLOR_TEXT_ACTIVE):
         self.delete("timer_text")
         cx, cy = Config.ICON_SIZE // 2, Config.ICON_SIZE // 2
         font_spec = self._get_adaptive_font(text)
         offsets = [(-1, -1), (0, -1), (1, -1), (-1,  0), (1,  0), (-1,  1), (0,  1), (1,  1)]
         for ox, oy in offsets:
             self.create_text(cx + ox, cy + oy, text=text, font=font_spec, fill=Config.COLOR_TEXT_OUTLINE, tags="timer_text", anchor="center")
-        self.create_text(cx, cy, text=text, font=font_spec, fill=Config.COLOR_TEXT_ACTIVE, tags="timer_text", anchor="center")
+        self.create_text(cx, cy, text=text, font=font_spec, fill=fill, tags="timer_text", anchor="center")
 
-    def _tick(self, remaining):
+    def _schedule(self, duration):
+        self._deadline = time.monotonic() + duration
+        self._tick()
+
+    def _tick(self):
+        self.timer_job = None
+        remaining = math.ceil(self._deadline - time.monotonic())
+        self.remaining = max(0, remaining)
         if remaining <= 0:
-            self._reset()
+            self._reset(broadcast=False)
             return
+        warn = remaining <= Config.WARN_THRESHOLD
+        self.itemconfig(self.warn_ring, state="normal" if warn else "hidden")
+
         m, s = divmod(remaining, 60)
         text = f"{m}:{s:02}" if remaining >= 60 else str(remaining)
-        self._draw_outlined_text(text)
-        self.timer_job = self.after(1000, lambda: self._tick(remaining - 1))
+        self._draw_outlined_text(
+            text, Config.COLOR_TEXT_WARN if warn else Config.COLOR_TEXT_ACTIVE)
 
-    def _reset(self):
+        delay = (self._deadline - time.monotonic() - (remaining - 1)) * 1000
+        self.timer_job = self.after(int(min(1000, max(20, delay))), self._tick)
+
+    def _reset(self, broadcast: bool = True):
+        was_active = self.is_active
         self.is_active = False
+        self.remaining = 0
         if self.timer_job: self.after_cancel(self.timer_job)
+        self.timer_job = None
         self.delete("timer_text")
         self.itemconfig(self.dim_id, state="hidden")
+        self.itemconfig(self.warn_ring, state="hidden")
+        if broadcast and was_active:
+            self.app_ref.broadcast_reset(self.champ_name, self.spell_name)
 
-# --- MAIN APP ---
+
 class OverlayApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Spell Timer") 
+        self.root.title("Spell Timer")
         self.root.configure(bg=Config.COLOR_BG)
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", Config.GLOBAL_OPACITY)
 
         self.game_active = False
-        self.enemy_data_cache = {} # Cache to store fresh enemy data
+        self.enemy_data_cache = {}
         self._img_refs = []
-        
+        self.widgets = {}
+        self.champ_icons = {}
+        self.cosmic_insight = {}
+        self.enemy_order = []
+        self.enemy_spells = {}
+
         self.saved_x = 0
         self.saved_y = 0
         self.is_pinned = False
+        self.room = ""
+        self.broker = Config.SYNC_BROKER
+        self.broker_port = Config.SYNC_PORT
+        self.riot_api_key = ""
+        self.region = ""
+        self.hotkey_mod = Config.DEFAULT_HOTKEY_MOD
         self._load_config()
+
+        self.rune_lookup = runes.RuneLookup(self.riot_api_key, self.region, Config.APP_DIR)
+        self.rune_status = None
+
+        self.hotkeys = hotkeys.HotkeyManager(self.hotkey_mod)
+        self.hotkeys.start()
+
+        self.sync = sync.SyncClient(self.room, self.broker, self.broker_port)
+        self.sync.start()
+        self._last_sync_state = None
+
+        self.game_poller = GamePoller()
+        self.game_poller.start()
+        self._last_snapshot = None
+        self._dialog = None
+        self._room_dialog_requested = False
+        self._apikey_dialog_requested = False
+        self._hotkey_dialog_requested = False
+        self._reset_position_requested = False
 
         self._drag_data = {"x": 0, "y": 0}
 
-        # UI Setup
         self.container = tk.Frame(self.root, bg=Config.COLOR_BORDER, padx=1, pady=1)
         self.container.pack()
         self.inner = tk.Frame(self.container, bg=Config.COLOR_BG, padx=4, pady=4)
@@ -362,55 +354,228 @@ class OverlayApp:
 
         self.handle = tk.Label(self.inner, text="::::", bg=Config.COLOR_BG, fg=Config.COLOR_HANDLE, font=("Arial", 7, "bold"), cursor="fleur")
         self.handle.pack(fill="x", pady=(0, 2))
-        
+
         self.handle.bind("<ButtonPress-1>", self._start_drag)
         self.handle.bind("<B1-Motion>", self._do_drag)
         self.handle.bind("<Button-3>", self._toggle_pin)
-        
+
         self._update_pin_visual()
 
         self.enemies_frame = tk.Frame(self.inner, bg=Config.COLOR_BG)
         self.enemies_frame.pack()
 
         self.root.withdraw()
-        
+
         self._setup_tray()
-        
+
         signal.signal(signal.SIGINT, self._graceful_exit)
-        
+
         self._monitor_game_loop()
+        self._poll_sync()
 
     def get_haste(self, champ_name: str) -> int:
-        """Returns the current haste for a specific champion from cache."""
         data = self.enemy_data_cache.get(champ_name, {})
-        return data.get('haste', 0)
+        haste = data.get('haste', 0)
+        if self.cosmic_insight.get(champ_name):
+            haste += runes.COSMIC_INSIGHT_HASTE
+        return haste
+
+    def set_cosmic_insight(self, champ: str, value: Optional[bool] = None,
+                           broadcast: bool = True):
+        current = self.cosmic_insight.get(champ, False)
+        new = (not current) if value is None else bool(value)
+        if new == current and value is not None:
+            return
+
+        self.cosmic_insight[champ] = new
+        icon = self.champ_icons.get(champ)
+        if icon:
+            icon.set_flag(new)
+
+        haste = self.get_haste(champ)
+        for (c, _), w in self.widgets.items():
+            if c == champ:
+                w.recalculate(haste)
+
+        if broadcast:
+            self.sync.publish(sync.MSG_CI, {"champ": champ, "on": new})
+        log.info(f"{champ}: Cosmic Insight {'ON' if new else 'OFF'} -> {haste} haste")
+
+
+    def broadcast_start(self, champ: str, spell: str, remaining: int):
+        self.sync.publish(sync.MSG_START, {"champ": champ, "spell": spell, "rem": int(remaining)})
+
+    def broadcast_reset(self, champ: str, spell: str):
+        self.sync.publish(sync.MSG_RESET, {"champ": champ, "spell": spell})
+
+    def broadcast_adjust(self, champ: str, spell: str, remaining: int):
+        self.sync.publish(sync.MSG_ADJUST,
+                          {"champ": champ, "spell": spell, "rem": int(remaining)})
+
+    def _poll_sync(self):
+        for msg in self.sync.poll():
+            try:
+                self._handle_sync_message(msg)
+            except Exception as e:
+                log.warning(f"Bad message ignored: {e}")
+
+        for status, found in self.rune_lookup.poll():
+            self._apply_rune_results(status, found)
+
+        for slot, spell_idx in self.hotkeys.poll():
+            self._fire_hotkey(slot, spell_idx)
+
+        if self._room_dialog_requested:
+            self._room_dialog_requested = False
+            self._open_room_dialog()
+
+        if self._apikey_dialog_requested:
+            self._apikey_dialog_requested = False
+            self._open_apikey_dialog()
+
+        if self._hotkey_dialog_requested:
+            self._hotkey_dialog_requested = False
+            self._open_hotkey_dialog()
+
+        if self._reset_position_requested:
+            self._reset_position_requested = False
+            self._reset_position()
+
+        self._update_pin_visual()
+        self.root.after(Config.UI_POLL_INTERVAL, self._poll_sync)
+
+    def _handle_sync_message(self, msg: Dict):
+        kind = msg.get("type")
+
+        if kind == sync.MSG_START:
+            self._apply_remote_start(msg.get("champ"), msg.get("spell"), msg.get("rem"))
+
+        elif kind == sync.MSG_RESET:
+            w = self.widgets.get((msg.get("champ"), msg.get("spell")))
+            if w and w.is_active:
+                w._reset(broadcast=False)
+
+        elif kind == sync.MSG_ADJUST:
+            w = self.widgets.get((msg.get("champ"), msg.get("spell")))
+            if w and w.is_active:
+                try:
+                    w.set_remaining(int(msg.get("rem")), broadcast=False)
+                except (TypeError, ValueError):
+                    pass
+
+        elif kind == sync.MSG_CI:
+            champ = msg.get("champ")
+            if champ:
+                self.set_cosmic_insight(champ, bool(msg.get("on")), broadcast=False)
+
+        elif kind == sync.MSG_HELLO:
+            timers = [
+                {"champ": c, "spell": s, "rem": w.remaining}
+                for (c, s), w in self.widgets.items() if w.is_active and w.remaining > 0
+            ]
+            ci = [c for c, on in self.cosmic_insight.items() if on]
+            if timers or ci:
+                self.sync.publish(sync.MSG_STATE, {"timers": timers, "ci": ci})
+
+        elif kind == sync.MSG_STATE:
+            for champ in msg.get("ci", []):
+                self.set_cosmic_insight(champ, True, broadcast=False)
+            for t in msg.get("timers", []):
+                self._apply_remote_start(t.get("champ"), t.get("spell"), t.get("rem"))
+
+    def _apply_remote_start(self, champ: Optional[str], spell: Optional[str], remaining: Any):
+        w = self.widgets.get((champ, spell))
+        if not w:
+            return
+        try:
+            remaining = int(remaining)
+        except (TypeError, ValueError):
+            return
+        if remaining <= 0:
+            return
+        if w.is_active and w.remaining >= remaining:
+            return
+        if w.is_active:
+            w._reset(broadcast=False)
+        w._start_timer(remaining, broadcast=False)
+        log.info(f"{champ} {spell} -> {remaining}s (from duo)")
+
+    def _fire_hotkey(self, slot: int, spell_idx: int):
+        if not self.game_active or slot >= len(self.enemy_order):
+            return
+        champ = self.enemy_order[slot]
+        spells = self.enemy_spells.get(champ, [])
+        if spell_idx >= len(spells):
+            return
+        w = self.widgets.get((champ, spells[spell_idx]))
+        if w:
+            w.arm()
+
+    def _apply_rune_results(self, status: str, found: Dict[str, bool]):
+        self.rune_status = status
+        if status != runes.OK:
+            reason = {
+                runes.NOT_FOUND: "custom/practice game, or not visible to spectator yet",
+                runes.FORBIDDEN: "API key rejected -- dev keys expire every 24h",
+                runes.NO_REGION: "region unknown -- set 'region' in config.json",
+                runes.ERROR: "lookup failed",
+            }.get(status, status)
+            log.info(f"No auto-detect ({reason}). Ctrl+click a portrait to set it manually.")
+            return
+
+        for champ in self.champ_icons:
+            self.set_cosmic_insight(champ, found.get(champ, False), broadcast=True)
+        hits = [c for c in self.champ_icons if found.get(c)]
+        log.info(f"Cosmic Insight: {', '.join(hits) if hits else 'nobody'}")
 
     def _setup_tray(self):
         def quit_app(icon, item):
-            print("[Tray] Quitting...")
+            log.info("Quitting.")
             self._save_config()
+            self.game_poller.stop()
+            self.sync.stop()
+            self.hotkeys.stop()
             icon.stop()
             self.root.quit()
             sys.exit(0)
 
+        def open_room(icon, item):
+            self._room_dialog_requested = True
+
+        def open_apikey(icon, item):
+            self._apikey_dialog_requested = True
+
+        def open_hotkeys(icon, item):
+            self._hotkey_dialog_requested = True
+
+        def reset_position(icon, item):
+            self._reset_position_requested = True
+
         custom_icon = resource_path("ico/icon.ico")
         flash_icon = resource_path("assets/spells/SummonerFlash.png")
-        
+
         image = None
         if os.path.exists(custom_icon):
             try:
                 image = Image.open(custom_icon)
-            except: pass
-            
+            except Exception:
+                pass
+
         if image is None and os.path.exists(flash_icon):
             image = Image.open(flash_icon)
-            
+
         if image is None:
             image = Image.new('RGB', (64, 64), color=(255, 255, 0))
 
-        menu = pystray.Menu(pystray.MenuItem("Quit", quit_app))
+        menu = pystray.Menu(
+            pystray.MenuItem("Duo Sync / Room Code...", open_room),
+            pystray.MenuItem("Riot API Key (rune auto-detect)...", open_apikey),
+            pystray.MenuItem("Hotkeys...", open_hotkeys),
+            pystray.MenuItem("Reset Position", reset_position),
+            pystray.MenuItem("Quit", quit_app)
+        )
         self.tray_icon = pystray.Icon("SpellTimer", image, "Spell Timer", menu)
-        
+
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def _load_config(self):
@@ -421,30 +586,63 @@ class OverlayApp:
                     self.saved_x = data.get('x', 0)
                     self.saved_y = data.get('y', 0)
                     self.is_pinned = data.get('pinned', False)
-                    print(f"[Config] Loaded: Pos({self.saved_x},{self.saved_y}), Pinned({self.is_pinned})")
+                    self.room = sync.sanitize_room(data.get('room', ''))
+                    self.broker = data.get('broker', Config.SYNC_BROKER)
+                    self.broker_port = int(data.get('broker_port', Config.SYNC_PORT))
+                    self.riot_api_key = (data.get('riot_api_key', '') or '').strip()
+                    self.region = (data.get('region', '') or '').strip()
+                    self.hotkey_mod = (data.get('hotkey_mod', Config.DEFAULT_HOTKEY_MOD) or '').strip()
+                    log.info(f"Loaded: Pos({self.saved_x},{self.saved_y}), Pinned({self.is_pinned}), "
+                             f"Room({self.room or 'none'}), RuneKey({'set' if self.riot_api_key else 'none'}), "
+                             f"Hotkeys({hotkeys.describe(self.hotkey_mod)})")
             except Exception as e:
-                print(f"[Config] Load error: {e}")
+                log.warning(f"Load error: {e}")
         else:
-            sw = self.root.winfo_screenwidth()
-            self.saved_x = sw - 250
-            self.saved_y = 100
+            self.saved_x, self.saved_y = self._default_position()
+
+        self.saved_x, self.saved_y = self._clamp_to_screen(self.saved_x, self.saved_y)
+
+    @staticmethod
+    def _default_position() -> Tuple[int, int]:
+        vx, vy, vw, _ = Win32Utils.virtual_screen()
+        return vx + vw - 250, vy + 100
+
+    @staticmethod
+    def _clamp_to_screen(x: int, y: int) -> Tuple[int, int]:
+        vx, vy, vw, vh = Win32Utils.virtual_screen()
+        margin_x, margin_y = 120, 40
+        cx = max(vx, min(int(x), vx + vw - margin_x))
+        cy = max(vy, min(int(y), vy + vh - margin_y))
+        if (cx, cy) != (int(x), int(y)):
+            log.warning("Saved position (%s,%s) is off-screen; moved to (%s,%s).",
+                        x, y, cx, cy)
+        return cx, cy
 
     def _save_config(self):
         data = {
             'x': self.saved_x,
             'y': self.saved_y,
-            'pinned': self.is_pinned
+            'pinned': self.is_pinned,
+            'room': self.room,
+            'broker': self.broker,
+            'broker_port': self.broker_port,
+            'riot_api_key': self.riot_api_key,
+            'region': self.region,
+            'hotkey_mod': self.hotkey_mod
         }
         try:
             with open(Config.CONFIG_FILE, 'w') as f:
                 json.dump(data, f)
-            print("[Config] Settings saved.")
+            log.info("Settings saved.")
         except Exception as e:
-            print(f"[Config] Save error: {e}")
+            log.warning(f"Save error: {e}")
 
     def _graceful_exit(self, signum, frame):
-        print("\n[Spell Timer] Stopping...")
+        log.info("Stopping.")
         self._save_config()
+        self.game_poller.stop()
+        self.sync.stop()
+        self.hotkeys.stop()
         if hasattr(self, 'tray_icon'):
             self.tray_icon.stop()
         self.root.destroy()
@@ -456,45 +654,206 @@ class OverlayApp:
         self._save_config()
 
     def _update_pin_visual(self):
-        if self.is_pinned:
-            self.handle.config(text="🔒 PINNED", fg=Config.COLOR_PINNED, cursor="arrow")
+        state = (self.is_pinned, self.sync.enabled, self.sync.connected)
+        if state == self._last_sync_state:
+            return
+        self._last_sync_state = state
+
+        if self.sync.enabled:
+            linked = self.sync.connected
+            suffix = "  🔗" if linked else "  ⌛"
+            fg = Config.COLOR_SYNCED if linked else Config.COLOR_HANDLE
         else:
-            self.handle.config(text="::::", fg=Config.COLOR_HANDLE, cursor="fleur")
+            suffix = ""
+            fg = Config.COLOR_HANDLE
+
+        if self.is_pinned:
+            self.handle.config(text="🔒 PINNED" + suffix, fg=Config.COLOR_PINNED, cursor="arrow")
+        else:
+            self.handle.config(text="::::" + suffix, fg=fg, cursor="fleur")
+
+    def _open_input_dialog(self, title, label, hint, initial, on_save):
+        if getattr(self, '_dialog', None) is not None:
+            try:
+                self._dialog.lift()
+                return
+            except Exception:
+                pass
+
+        dlg = tk.Toplevel(self.root)
+        self._dialog = dlg
+        dlg.title(title)
+        dlg.configure(bg=Config.COLOR_BG)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.geometry(f"+{self.saved_x - 120}+{self.saved_y + 40}")
+
+        tk.Label(dlg, text=label, bg=Config.COLOR_BG, fg="#CDBE91",
+                 font=(Config.FONT_FAMILY, 9)).pack(padx=14, pady=(14, 6))
+
+        entry = tk.Entry(dlg, width=38, font=(Config.FONT_FAMILY, 10), justify="center",
+                         bg="#10203C", fg="#FFFFFF", insertbackground="#FFFFFF", relief="flat")
+        entry.insert(0, initial)
+        entry.pack(padx=14, pady=(0, 4))
+        entry.focus_force()
+
+        tk.Label(dlg, text=hint, bg=Config.COLOR_BG, fg=Config.COLOR_HANDLE,
+                 font=(Config.FONT_FAMILY, 8)).pack(padx=14, pady=(0, 10))
+
+        def close():
+            self._dialog = None
+            dlg.destroy()
+
+        def save():
+            value = entry.get()
+            close()
+            on_save(value)
+
+        btns = tk.Frame(dlg, bg=Config.COLOR_BG)
+        btns.pack(padx=14, pady=(0, 14))
+        tk.Button(btns, text="Save", command=save, relief="flat", bg="#1E3A5F", fg="#FFFFFF",
+                  activebackground="#2A5080", activeforeground="#FFFFFF", width=10, bd=0).pack(side="left", padx=4)
+        tk.Button(btns, text="Cancel", command=close, relief="flat", bg="#2A2A2A", fg="#BBBBBB",
+                  activebackground="#3A3A3A", activeforeground="#FFFFFF", width=10, bd=0).pack(side="left", padx=4)
+
+        entry.bind("<Return>", lambda e: save())
+        dlg.bind("<Escape>", lambda e: close())
+        dlg.protocol("WM_DELETE_WINDOW", close)
+
+    def _open_room_dialog(self):
+        def apply(value):
+            new_room = sync.sanitize_room(value)
+            if new_room != self.room:
+                self.room = new_room
+                self._save_config()
+                self._restart_sync()
+
+        self._open_input_dialog(
+            "Duo Sync",
+            "Room code (both of you type the same thing):",
+            "Leave empty to turn sync off.",
+            self.room, apply)
+
+    def _open_apikey_dialog(self):
+        def apply(value):
+            key = (value or "").strip()
+            if key == self.riot_api_key:
+                return
+            self.riot_api_key = key
+            self._save_config()
+            self.rune_lookup = runes.RuneLookup(self.riot_api_key, self.region, Config.APP_DIR)
+            self.rune_status = None
+            log.info(f"API key {'set' if key else 'cleared'}.")
+            if self.game_active and self.rune_lookup.enabled and self._last_snapshot:
+                self.rune_lookup.start(
+                    GameDataManager.player_ids(self._last_snapshot))
+
+        self._open_input_dialog(
+            "Riot API Key",
+            "Riot API key -- auto-detects enemy Cosmic Insight:",
+            "Optional. Get one at developer.riotgames.com (dev keys last 24h).\n"
+            "Leave empty to rely on Ctrl+click only.",
+            self.riot_api_key, apply)
+
+    def _open_hotkey_dialog(self):
+        def apply(value):
+            new_mod = (value or "").strip().lower()
+            if new_mod == self.hotkey_mod:
+                return
+            _, err = hotkeys.parse_modifier(new_mod)
+            if new_mod and err:
+                log.warning(f"Ignored '{new_mod}': {err}.")
+                return
+            self.hotkey_mod = new_mod
+            self._save_config()
+            self.hotkeys.stop()
+            self.hotkeys = hotkeys.HotkeyManager(self.hotkey_mod)
+            self.hotkeys.start()
+
+        self._open_input_dialog(
+            "Hotkeys",
+            "Modifier for slot hotkeys (<mod>+1-5 arms a spell):",
+            "e.g. alt, ctrl, ctrl+alt. Add Shift for the second spell. "
+            "Empty turns hotkeys off. Shift alone is not allowed.",
+            self.hotkey_mod, apply)
+
+    def _reset_position(self):
+        self.saved_x, self.saved_y = self._default_position()
+        self.is_pinned = False
+        if self.game_active:
+            self.root.geometry(f"+{self.saved_x}+{self.saved_y}")
+        self._update_pin_visual()
+        self._save_config()
+        log.info("Position reset to (%s,%s).", self.saved_x, self.saved_y)
+
+    def _restart_sync(self):
+        self.sync.stop()
+        self.sync = sync.SyncClient(self.room, self.broker, self.broker_port)
+        self.sync.start()
+        self._last_sync_state = None
+        self._update_pin_visual()
 
     def _monitor_game_loop(self):
-        data = GameDataManager.fetch_data()
-        if data:
-            # 1. Parse enemies and update cache with fresh data (items/haste)
-            enemies = GameDataManager.parse_enemies(data)
-            for enemy in enemies:
-                self.enemy_data_cache[enemy['champ']] = enemy
-            
-            # 2. Build UI only if game just started
-            if not self.game_active:
-                print("[Spell Timer] Match found!")
-                self._build_enemy_rows(enemies)
-                self.root.deiconify()
-                self.root.geometry(f"+{self.saved_x}+{self.saved_y}")
-                self.root.after(100, self._apply_native_styles)
-                self.game_active = True
-            
-            # NOTE: We do NOT rebuild UI in loop to preserve running timers.
-            # Haste data is fetched from cache dynamically on click.
-            
-        else:
-            if self.game_active:
-                print("[Spell Timer] Match ended.")
-                self.root.withdraw()
-                self._save_config()
-                self.game_active = False
-                self.enemy_data_cache.clear()
-                
-        self.root.after(Config.CHECK_INTERVAL, self._monitor_game_loop)
+        item = self.game_poller.poll()
+
+        if item is MATCH_ENDED:
+            self._on_match_ended()
+        elif item is not None:
+            self._on_game_data(item)
+
+        self.root.after(Config.UI_POLL_INTERVAL, self._monitor_game_loop)
+
+    def _on_game_data(self, data: Dict):
+        self._last_snapshot = data
+        enemies = GameDataManager.parse_enemies(data)
+        for enemy in enemies:
+            self.enemy_data_cache[enemy['champ']] = enemy
+
+        if not self.game_active:
+            if not enemies:
+                return
+            log.info("Match found (%d enemies).", len(enemies))
+            self._build_enemy_rows(enemies)
+            self.root.deiconify()
+            self.root.geometry(f"+{self.saved_x}+{self.saved_y}")
+            self.root.after(100, self._apply_native_styles)
+            self.game_active = True
+            self.sync.publish(sync.MSG_HELLO, {})
+            self.rune_lookup.start(GameDataManager.player_ids(data))
+            return
+
+        self._refresh_haste(enemies)
+
+    def _refresh_haste(self, enemies: List[Dict]):
+        for enemy in enemies:
+            champ = enemy['champ']
+            haste = self.get_haste(champ)
+            for (c, _), w in self.widgets.items():
+                if c == champ:
+                    w.recalculate(haste)
+
+    def _on_match_ended(self):
+        if not self.game_active:
+            return
+        log.info("Match ended.")
+        self.root.withdraw()
+        self._save_config()
+        self.game_active = False
+        self.enemy_data_cache.clear()
+        self.widgets.clear()
+        self.champ_icons.clear()
+        self.cosmic_insight.clear()
+        self.enemy_order.clear()
+        self.enemy_spells.clear()
+        self.rune_status = None
 
     def _build_enemy_rows(self, enemies: List[Dict]):
-        # Full rebuild (only on game start)
         for widget in self.enemies_frame.winfo_children(): widget.destroy()
         self._img_refs.clear()
+        self.widgets.clear()
+        self.champ_icons.clear()
+        self.enemy_order.clear()
+        self.enemy_spells.clear()
 
         if not enemies: return
 
@@ -508,13 +867,17 @@ class OverlayApp:
 
             champ_icon = AssetManager.load_icon("champions", enemy['champ'], (Config.ICON_SIZE, Config.ICON_SIZE), is_round=True)
             self._img_refs.append(champ_icon)
-            lbl = tk.Label(row, image=champ_icon, bg=Config.COLOR_BG, bd=0)
-            lbl.pack(side="left", padx=(0, 8))
+            portrait = ChampionIcon(row, enemy['champ'], self, champ_icon)
+            portrait.set_flag(self.cosmic_insight.get(enemy['champ'], False))
+            portrait.pack(side="left", padx=(0, 8))
+            self.champ_icons[enemy['champ']] = portrait
+            self.enemy_order.append(enemy['champ'])
+            self.enemy_spells[enemy['champ']] = [enemy['spell1'], enemy['spell2']]
 
             for s_name in [enemy['spell1'], enemy['spell2']]:
-                # Pass 'self' (app) reference so the button can query cache
                 sw = SpellTimerWidget(row, enemy['champ'], s_name, self)
                 sw.pack(side="left", padx=3)
+                self.widgets[(enemy['champ'], s_name)] = sw
                 self._img_refs.append(sw.icon_img)
                 self._img_refs.append(sw.dim_img)
 
@@ -524,7 +887,7 @@ class OverlayApp:
         Win32Utils.set_no_focus(hwnd)
 
     def _start_drag(self, event):
-        if self.is_pinned: return 
+        if self.is_pinned: return
         self._drag_data["x"] = event.x
         self._drag_data["y"] = event.y
 
@@ -534,7 +897,7 @@ class OverlayApp:
         dy = event.y - self._drag_data["y"]
         x = self.root.winfo_x() + dx
         y = self.root.winfo_y() + dy
-        
+
         self.root.geometry(f"+{x}+{y}")
         self.saved_x = x
         self.saved_y = y
@@ -547,6 +910,16 @@ if __name__ == "__main__":
     if checker.is_already_running():
         sys.exit(0)
 
-    DDragonManager.update_timers()
-    app = OverlayApp()
-    app.run()
+    applog.setup(Config.LOG_FILE)
+    log.info("--- Spell Timer starting ---")
+
+    cooldowns = SpellCooldowns()
+    cooldowns.apply_cached()
+    cooldowns.refresh_async()
+
+    try:
+        app = OverlayApp()
+        app.run()
+    except Exception:
+        log.exception("Fatal error")
+        raise
