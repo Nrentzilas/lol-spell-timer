@@ -9,7 +9,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hotkeys
 import runes
 import sync
-from gamedata import SpellCooldowns
+import chat
+import gamedata
+import gamewindow
+import clipboardtyper
+from gamedata import SpellCooldowns, GameDataManager
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -147,3 +151,85 @@ def test_zero_cooldown_placeholders_are_ignored(tmp_path):
     finally:
         Config.SPELL_TIMERS.clear()
         Config.SPELL_TIMERS.update(before)
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "0:00"),
+    (5, "0:05"),
+    (65, "1:05"),
+    (872, "14:32"),
+    (3600, "60:00"),
+    (-10, "0:00"),
+    (14.9, "0:14"),
+])
+
+
+def test_format_clock(seconds, expected):
+    assert gamedata.format_clock(seconds) == expected
+
+
+@pytest.mark.parametrize("spell,expected", [
+    ("SummonerFlash", "Flash"),
+    ("SummonerFlash2", "Flash"),
+    ("SummonerDot", "Ignite"),
+    ("SummonerBoost", "Cleanse"),
+    ("SummonerHaste", "Ghost"),
+    ("SummonerTeleport", "TP"),
+    ("SummonerUnknownThing", "UnknownThing"),
+    ("", "Spell"),
+])
+
+
+def test_spell_label(spell, expected):
+    assert chat.spell_label(spell) == expected
+
+
+def test_message_uses_game_clock():
+    assert chat.format_message("MissFortune", "SummonerFlash", 165, 720) == \
+        "MissFortune Flash up at 14:45"
+
+
+def test_message_without_game_clock_falls_back_to_relative():
+    assert chat.format_message("Ahri", "SummonerFlash", 165, None) == \
+        "Ahri Flash back in 2:45"
+
+
+def test_message_when_spell_is_up():
+    assert chat.format_message("Ahri", "SummonerFlash", 0, 720) == "Ahri Flash is up"
+
+
+def test_game_time_parsing():
+    assert GameDataManager.game_time({"gameData": {"gameTime": 872.4}}) == 872.4
+    assert GameDataManager.game_time({"gameData": {}}) is None
+    assert GameDataManager.game_time({}) is None
+    assert GameDataManager.game_time(None) is None
+    assert GameDataManager.game_time({"gameData": {"gameTime": "x"}}) is None
+
+
+def test_gamewindow_mode_is_a_known_value():
+    assert gamewindow.mode() in (None, gamewindow.FULLSCREEN,
+                                 gamewindow.BORDERLESS, gamewindow.WINDOWED)
+
+
+def test_gamewindow_handles_league_being_absent():
+    assert isinstance(gamewindow.find(), int)
+    assert isinstance(gamewindow.is_foreground(0), bool)
+    assert gamewindow.is_foreground(0) is False
+    assert gamewindow.rect(0) is None
+
+
+def test_typer_starts_disabled_and_types_nothing(monkeypatch):
+    t = clipboardtyper.ClipboardTyper()
+    assert t.enabled is False
+    sent = []
+    monkeypatch.setattr(clipboardtyper, "_SendInput", lambda *a: sent.append(a) or 2)
+    assert clipboardtyper.type_text("") == 0
+    assert sent == []
+
+
+def test_type_text_counts_characters(monkeypatch):
+    calls = []
+    monkeypatch.setattr(clipboardtyper, "_SendInput",
+                        lambda n, arr, size: calls.append(n) or 2)
+    assert clipboardtyper.type_text("abc") == 3
+    assert calls == [2, 2, 2]          # one SendInput of 2 events per character

@@ -17,6 +17,9 @@ import applog
 import sync
 import runes
 import hotkeys
+import chat
+import gamewindow
+import clipboardtyper
 from config import Config, resource_path
 from gamedata import GameDataManager, GamePoller, SpellCooldowns, MATCH_ENDED
 
@@ -45,6 +48,13 @@ class Win32Utils:
     WS_EX_NOACTIVATE = 0x08000000
     WS_EX_TOPMOST = 0x00000008
 
+    HWND_TOPMOST = -1
+    SW_SHOWNOACTIVATE = 4
+    SWP_NOSIZE = 0x0001
+    SWP_NOMOVE = 0x0002
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
+
     SM_XVIRTUALSCREEN = 76
     SM_YVIRTUALSCREEN = 77
     SM_CXVIRTUALSCREEN = 78
@@ -72,6 +82,31 @@ class Win32Utils:
                 Win32Utils.GWL_EXSTYLE,
                 style | Win32Utils.WS_EX_NOACTIVATE | Win32Utils.WS_EX_TOPMOST
             )
+        except Exception:
+            pass
+
+    @staticmethod
+    def hwnd_of(window) -> int:
+        window.update_idletasks()
+        return ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
+
+    @staticmethod
+    def show_no_activate(hwnd: int):
+        try:
+            u = ctypes.windll.user32
+            u.ShowWindow(hwnd, Win32Utils.SW_SHOWNOACTIVATE)
+            u.SetWindowPos(hwnd, Win32Utils.HWND_TOPMOST, 0, 0, 0, 0,
+                           Win32Utils.SWP_NOMOVE | Win32Utils.SWP_NOSIZE |
+                           Win32Utils.SWP_NOACTIVATE | Win32Utils.SWP_SHOWWINDOW)
+        except Exception:
+            pass
+
+    @staticmethod
+    def raise_topmost(hwnd: int):
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, Win32Utils.HWND_TOPMOST, 0, 0, 0, 0,
+                Win32Utils.SWP_NOMOVE | Win32Utils.SWP_NOSIZE | Win32Utils.SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -163,10 +198,15 @@ class SpellTimerWidget(tk.Canvas):
 
         self.bind("<Button-1>", self._on_left_click)
         self.bind("<Button-3>", self._on_right_click)
+        self.bind("<Button-2>", self._on_middle_click)
         self.bind("<MouseWheel>", self._on_scroll)
 
     def _on_left_click(self, event):
         self.arm()
+
+    def _on_middle_click(self, event):
+        self.app_ref.call_out(self.champ_name, self.spell_name,
+                              self.remaining if self.is_active else 0)
 
     def arm(self):
         if self.is_active: return
@@ -300,11 +340,16 @@ class SpellTimerWidget(tk.Canvas):
 class OverlayApp:
     def __init__(self):
         self.root = tk.Tk()
+        self.root.withdraw()
         self.root.title("Spell Timer")
         self.root.configure(bg=Config.COLOR_BG)
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
         self.root.wm_attributes("-alpha", Config.GLOBAL_OPACITY)
+
+        self.hwnd = Win32Utils.hwnd_of(self.root)
+        Win32Utils.set_no_focus(self.hwnd)
+        self._warned_fullscreen = False
 
         self.game_active = False
         self.enemy_data_cache = {}
@@ -324,6 +369,7 @@ class OverlayApp:
         self.riot_api_key = ""
         self.region = ""
         self.hotkey_mod = Config.DEFAULT_HOTKEY_MOD
+        self.type_on_paste = False
         self._load_config()
 
         self.rune_lookup = runes.RuneLookup(self.riot_api_key, self.region, Config.APP_DIR)
@@ -331,6 +377,9 @@ class OverlayApp:
 
         self.hotkeys = hotkeys.HotkeyManager(self.hotkey_mod)
         self.hotkeys.start()
+
+        self.typer = clipboardtyper.ClipboardTyper(enabled=self.type_on_paste)
+        self.typer.start()
 
         self.sync = sync.SyncClient(self.room, self.broker, self.broker_port)
         self.sync.start()
@@ -551,6 +600,13 @@ class OverlayApp:
         def reset_position(icon, item):
             self._reset_position_requested = True
 
+        def toggle_type_on_paste(icon, item):
+            self.type_on_paste = not self.type_on_paste
+            self.typer.enabled = self.type_on_paste
+            self._save_config()
+            log.info("Type clipboard on Ctrl+V: %s",
+                     "on" if self.type_on_paste else "off")
+
         custom_icon = resource_path("ico/icon.ico")
         flash_icon = resource_path("assets/spells/SummonerFlash.png")
 
@@ -571,6 +627,9 @@ class OverlayApp:
             pystray.MenuItem("Duo Sync / Room Code...", open_room),
             pystray.MenuItem("Riot API Key (rune auto-detect)...", open_apikey),
             pystray.MenuItem("Hotkeys...", open_hotkeys),
+            pystray.MenuItem("Type clipboard on Ctrl+V (in game)",
+                             toggle_type_on_paste,
+                             checked=lambda item: self.type_on_paste),
             pystray.MenuItem("Reset Position", reset_position),
             pystray.MenuItem("Quit", quit_app)
         )
@@ -592,6 +651,7 @@ class OverlayApp:
                     self.riot_api_key = (data.get('riot_api_key', '') or '').strip()
                     self.region = (data.get('region', '') or '').strip()
                     self.hotkey_mod = (data.get('hotkey_mod', Config.DEFAULT_HOTKEY_MOD) or '').strip()
+                    self.type_on_paste = bool(data.get('type_on_paste', False))
                     log.info(f"Loaded: Pos({self.saved_x},{self.saved_y}), Pinned({self.is_pinned}), "
                              f"Room({self.room or 'none'}), RuneKey({'set' if self.riot_api_key else 'none'}), "
                              f"Hotkeys({hotkeys.describe(self.hotkey_mod)})")
@@ -628,7 +688,8 @@ class OverlayApp:
             'broker_port': self.broker_port,
             'riot_api_key': self.riot_api_key,
             'region': self.region,
-            'hotkey_mod': self.hotkey_mod
+            'hotkey_mod': self.hotkey_mod,
+            'type_on_paste': self.type_on_paste
         }
         try:
             with open(Config.CONFIG_FILE, 'w') as f:
@@ -643,6 +704,7 @@ class OverlayApp:
         self.game_poller.stop()
         self.sync.stop()
         self.hotkeys.stop()
+        self.typer.stop()
         if hasattr(self, 'tray_icon'):
             self.tray_icon.stop()
         self.root.destroy()
@@ -794,6 +856,9 @@ class OverlayApp:
         self._update_pin_visual()
 
     def _monitor_game_loop(self):
+        if self.game_active:
+            Win32Utils.raise_topmost(self.hwnd)
+
         item = self.game_poller.poll()
 
         if item is MATCH_ENDED:
@@ -814,15 +879,44 @@ class OverlayApp:
                 return
             log.info("Match found (%d enemies).", len(enemies))
             self._build_enemy_rows(enemies)
-            self.root.deiconify()
             self.root.geometry(f"+{self.saved_x}+{self.saved_y}")
-            self.root.after(100, self._apply_native_styles)
+            Win32Utils.set_no_focus(self.hwnd)
+            Win32Utils.show_no_activate(self.hwnd)
             self.game_active = True
+            self._check_display_mode()
             self.sync.publish(sync.MSG_HELLO, {})
             self.rune_lookup.start(GameDataManager.player_ids(data))
             return
 
         self._refresh_haste(enemies)
+
+    def _check_display_mode(self):
+        if self._warned_fullscreen:
+            return
+        if gamewindow.mode() != gamewindow.FULLSCREEN:
+            return
+        self._warned_fullscreen = True
+        log.warning(
+            "League is in Fullscreen. It marks itself topmost there, so the "
+            "overlay cannot draw above it and you will not see any timers. "
+            "Switch League to Borderless in Settings -> Video.")
+        self._notify("Overlay hidden in Fullscreen",
+                     "League is set to Fullscreen, so the overlay cannot draw "
+                     "over it. Switch to Borderless in Settings -> Video.")
+
+    def _notify(self, title: str, message: str):
+        try:
+            if getattr(self, "tray_icon", None):
+                self.tray_icon.notify(message, title)
+        except Exception as e:
+            log.debug("Tray notification failed: %s", e)
+
+    def call_out(self, champ: str, spell: str, remaining: int):
+        msg = chat.format_message(champ, spell, remaining,
+                                  GameDataManager.game_time(self._last_snapshot))
+        if not chat.copy(self.root, msg):
+            return
+        log.info("Copied: %s", msg)
 
     def _refresh_haste(self, enemies: List[Dict]):
         for enemy in enemies:
