@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import Config
+from config import Config, DUPLICATE_SUFFIX
 
 log = logging.getLogger("game")
 
@@ -143,7 +143,7 @@ class GameDataManager:
             spell2 = GameDataManager._clean_spell_name(
                 (spells.get("summonerSpellTwo") or {}).get("rawDisplayName"))
             if spell2 == spell1:
-                spell2 = spell2 + "2"
+                spell2 = spell2 + DUPLICATE_SUFFIX
 
             enemies.append({
                 "champ": champ_name,

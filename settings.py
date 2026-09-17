@@ -57,6 +57,7 @@ class Settings:
     hotkey_mod: str = Config.DEFAULT_HOTKEY_MOD
     type_on_paste: bool = False
     send_callouts: bool = False
+    sound_cue: bool = False
     ui_scale: float = 1.0
     path: str = field(default=Config.CONFIG_FILE, repr=False)
 
@@ -91,6 +92,7 @@ class Settings:
             s.hotkey_mod = (data.get("hotkey_mod", Config.DEFAULT_HOTKEY_MOD) or "").strip()
             s.type_on_paste = bool(data.get("type_on_paste", False))
             s.send_callouts = bool(data.get("send_callouts", False))
+            s.sound_cue = bool(data.get("sound_cue", False))
             s.ui_scale = Config.clamp_scale(data.get("ui_scale", 1.0))
 
         s.x, s.y = clamp_to_screen(s.x, s.y)
@@ -120,6 +122,7 @@ class Settings:
             "hotkey_mod": self.hotkey_mod,
             "type_on_paste": bool(self.type_on_paste),
             "send_callouts": bool(self.send_callouts),
+            "sound_cue": bool(self.sound_cue),
             "ui_scale": float(self.ui_scale),
         }
 

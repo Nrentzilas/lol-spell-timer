@@ -20,6 +20,7 @@ to set up per match. Start a game and five rows appear.
 - **Haste handled.** Lucidity boots and Cosmic Insight are accounted for, including on timers already counting down.
 - **Scroll to correct.** Nudge a running timer by 5s when you clicked late.
 - **Sizeable.** Pick an overlay size in the tray menu if 4K makes it tiny.
+- **Optional beep** when a tracked spell comes back up, for when you are looking at the game.
 
 ## Install
 
@@ -55,6 +56,7 @@ The code is split so the parts worth testing have no UI attached:
 | `sync.py` | duo sync over MQTT |
 | `runes.py` | optional Cosmic Insight lookup |
 | `hotkeys.py` / `clipboardtyper.py` | the two Win32 input paths |
+| `sound.py` | the audio cue |
 | `settings.py` / `tray.py` / `dialogs.py` / `win32util.py` | configuration and window plumbing |
 
 </details>
@@ -78,6 +80,11 @@ running timers survive the change.
 
 Not in a game and want to place it first? Turn on **Show demo rows** in the tray
 menu, drag it where you want it, and turn it off again.
+
+The overlay only helps while you are looking at it, so **Beep when a spell comes
+back up** in the tray menu gives you a short tone instead. Off by default, and it
+fires only when a cooldown actually runs out -- not when you clear a timer by hand
+or a rune correction wipes one out.
 
 ## Hotkeys
 
@@ -166,8 +173,10 @@ flag the rune by hand. A purple `CI` badge appears and any running timer is
 corrected on the spot.
 
 Optionally, add a [Riot API key](https://developer.riotgames.com) in the tray menu
-and the app detects it automatically at match start. Note that free keys expire
-every 24 hours and only work in matchmade games.
+and the app detects it automatically. Riot's spectator endpoint does not know about
+a game the moment it starts, so the lookup retries over the first few minutes and
+only gives up after that. Note that free keys expire every 24 hours and only work
+in matchmade games.
 
 ## Set League to Borderless
 

@@ -25,6 +25,7 @@ RESET_POSITION = "reset_position"
 TOGGLE_SEND = "toggle_send"
 TOGGLE_PASTE = "toggle_paste"
 TOGGLE_DEMO = "toggle_demo"
+TOGGLE_SOUND = "toggle_sound"
 OPEN_LOG = "open_log"
 QUIT = "quit"
 SCALE = "scale"
@@ -86,6 +87,9 @@ class Tray:
             pystray.MenuItem("Type clipboard on Ctrl+V (in game)",
                              self._act(TOGGLE_PASTE),
                              checked=lambda _i: self.state.type_on_paste),
+            pystray.MenuItem("Beep when a spell comes back up",
+                             self._act(TOGGLE_SOUND),
+                             checked=lambda _i: self.state.sound_cue),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Show demo rows (to position it)",
                              self._act(TOGGLE_DEMO),
@@ -100,6 +104,18 @@ class Tray:
         """Start the tray on its own thread."""
         import threading
         threading.Thread(target=self.icon.run, daemon=True, name="tray").start()
+
+    def refresh(self) -> None:
+        """Rebuild the menu so its ticks match the current state.
+
+        pystray does this itself after a menu click. It is needed only when
+        something else changes what an item shows -- a match starting turns
+        demo rows off, and the tick has to follow.
+        """
+        try:
+            self.icon.update_menu()
+        except Exception as e:
+            log.debug("Menu refresh failed: %s", e)
 
     def notify(self, title: str, message: str) -> None:
         try:

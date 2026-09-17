@@ -44,6 +44,7 @@ def test_roundtrip(path):
     s.riot_api_key = "RGAPI-test"
     s.ui_scale = 1.5
     s.send_callouts = True
+    s.sound_cue = True
     assert s.save() is True
 
     again = Settings.load(path)
@@ -52,6 +53,7 @@ def test_roundtrip(path):
     assert again.riot_api_key == "RGAPI-test"
     assert again.ui_scale == 1.5
     assert again.send_callouts is True
+    assert again.sound_cue is True
 
 
 def test_a_save_leaves_no_temporary_file_behind(path):

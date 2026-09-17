@@ -28,6 +28,9 @@ htmlcov/
 .vscode/
 .idea/
 
+# Personal notes, deliberately not shared
+IDEAS.md
+
 # Environment files
 .env
 *.env

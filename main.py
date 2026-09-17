@@ -29,6 +29,7 @@ import dialogs
 import gamewindow
 import hotkeys
 import runes
+import sound
 import sync
 import tray as tray_module
 from config import Config
@@ -52,6 +53,42 @@ DEMO_ENEMIES = [
     {"champ": "Ezreal", "spell1": "SummonerFlash", "spell2": "SummonerHeal", "haste": 0},
     {"champ": "Leona", "spell1": "SummonerFlash", "spell2": "SummonerExhaust", "haste": 0},
 ]
+
+
+# Which tray item shows a tick for which flag.
+TOGGLE_FLAGS = {
+    tray_module.TOGGLE_SEND: "send_callouts",
+    tray_module.TOGGLE_PASTE: "type_on_paste",
+    tray_module.TOGGLE_SOUND: "sound_cue",
+}
+
+
+def apply_tray_toggle(state, name: str, value: Any = None) -> bool:
+    """Flip what a tray item shows a tick for. Returns whether it applied.
+
+    This has to happen while the click handler is still running. pystray
+    rebuilds the native menu the moment the handler returns, reading every
+    item's checked state right then (`_base.py`, the `finally: update_menu()`
+    around each callback), and the rebuilt menu bakes those ticks in. A flag
+    flipped afterwards on the Tk thread is therefore drawn one click behind,
+    which is the bug this exists to prevent.
+
+    Only the flag moves here. Everything it implies -- saving, redrawing,
+    telling the typer -- is queued for the Tk thread, which owns all of that.
+    """
+    attr = TOGGLE_FLAGS.get(name)
+    if attr is not None:
+        setattr(state.settings, attr, not getattr(state.settings, attr))
+        return True
+    if name == tray_module.TOGGLE_DEMO:
+        # Refused while a match is running, and the tick must show the refusal
+        # rather than claiming something that did not happen.
+        state.demo_mode = (not state.demo_mode) and not state.game_active
+        return True
+    if name == tray_module.SCALE:
+        state.settings.ui_scale = Config.clamp_scale(value)
+        return True
+    return False
 
 
 class OverlayApp:
@@ -105,6 +142,8 @@ class OverlayApp:
             enabled=settings.type_on_paste, send_enabled=settings.send_callouts)
         self.typer.start()
 
+        self.chime = sound.Chime(enabled=settings.sound_cue)
+
         self.sync = self._new_sync_client()
         self.sync.start()
 
@@ -134,6 +173,10 @@ class OverlayApp:
     @property
     def type_on_paste(self) -> bool:
         return self.settings.type_on_paste
+
+    @property
+    def sound_cue(self) -> bool:
+        return self.settings.sound_cue
 
     # -- construction ----------------------------------------------------
 
@@ -193,9 +236,18 @@ class OverlayApp:
         log.info("%s: Cosmic Insight %s -> %d haste", champ,
                  "ON" if new else "OFF", haste)
 
-    def _apply_rune_results(self, status: str, found: Dict[str, bool]) -> None:
+    def spell_ready(self, champ: str, spell: str) -> None:
+        """A tracked spell just came back up."""
+        self.chime.play()
+
+    def _apply_rune_results(self, status: str, found: Dict[str, bool],
+                            final: bool = True) -> None:
         self.rune_status = status
         if status != runes.OK:
+            if not final:
+                # Another attempt is already scheduled; saying "set it by
+                # hand" here would be wrong, and saying it four times worse.
+                return
             reason = {
                 runes.NOT_FOUND: "custom/practice game, or not visible to spectator yet",
                 runes.FORBIDDEN: "API key rejected -- dev keys expire every 24h",
@@ -328,8 +380,8 @@ class OverlayApp:
             except Exception as e:
                 log.warning("Bad message ignored: %s", e)
 
-        for status, found in self.rune_lookup.poll():
-            self._apply_rune_results(status, found)
+        for status, found, final in self.rune_lookup.poll():
+            self._apply_rune_results(status, found, final)
 
         for slot, spell_idx in self.hotkeys.poll():
             self._fire_hotkey(slot, spell_idx)
@@ -372,7 +424,12 @@ class OverlayApp:
     # -- tray actions ----------------------------------------------------
 
     def request(self, name: str, value: Any = None) -> None:
-        """Called from the tray thread. Only queues; never touches Tk."""
+        """Called from the tray thread. Never touches Tk.
+
+        The menu's ticks are read as soon as this returns, so anything one of
+        them reflects is flipped here; the work it implies is queued.
+        """
+        apply_tray_toggle(self, name, value)
         self._actions.put((name, value))
 
     def _dispatch(self, name: str, value: Any) -> None:
@@ -384,11 +441,12 @@ class OverlayApp:
             tray_module.TOGGLE_SEND: self._toggle_send_callouts,
             tray_module.TOGGLE_PASTE: self._toggle_type_on_paste,
             tray_module.TOGGLE_DEMO: self._toggle_demo,
+            tray_module.TOGGLE_SOUND: self._toggle_sound_cue,
             tray_module.OPEN_LOG: self._open_log,
             tray_module.QUIT: self._shutdown,
         }
         if name == tray_module.SCALE:
-            self._set_scale(value)
+            self._apply_scale()
             return
         handler = handlers.get(name)
         if handler is None:
@@ -397,14 +455,21 @@ class OverlayApp:
         handler()
 
     def _toggle_send_callouts(self) -> None:
-        self.settings.send_callouts = not self.settings.send_callouts
+        # Already flipped by apply_tray_toggle; this applies the consequences.
         self.typer.send_enabled = self.settings.send_callouts
         self.settings.save()
         log.info("Send call-outs to chat: %s",
                  "on" if self.settings.send_callouts else "off")
 
+    def _toggle_sound_cue(self) -> None:
+        self.chime.enabled = self.settings.sound_cue
+        self.settings.save()
+        if self.settings.sound_cue:
+            self.chime.play()          # so you know what you just turned on
+        log.info("Beep when a spell comes back up: %s",
+                 "on" if self.settings.sound_cue else "off")
+
     def _toggle_type_on_paste(self) -> None:
-        self.settings.type_on_paste = not self.settings.type_on_paste
         self.typer.enabled = self.settings.type_on_paste
         self.settings.save()
         log.info("Type clipboard on Ctrl+V: %s",
@@ -416,11 +481,11 @@ class OverlayApp:
         except Exception as e:
             log.warning("Could not open the log file: %s", e)
 
-    def _set_scale(self, value: Any) -> None:
-        scale = Config.clamp_scale(value)
-        if abs(scale - self.settings.ui_scale) < 0.01:
+    def _apply_scale(self) -> None:
+        """Draw at the size the menu already reports."""
+        scale = self.settings.ui_scale
+        if abs(Config.UI_SCALE - scale) < 0.01:
             return
-        self.settings.ui_scale = scale
         Config.UI_SCALE = scale
         self.settings.save()
         log.info("Overlay scale set to %gx.", scale)
@@ -430,9 +495,7 @@ class OverlayApp:
         if self.game_active:
             # A real match outranks the demo, and already shows real rows.
             log.info("Demo rows are not needed while a match is running.")
-            self.demo_mode = False
             return
-        self.demo_mode = not self.demo_mode
         if self.demo_mode:
             log.info("Showing demo rows.")
             self._build_enemy_rows(DEMO_ENEMIES)
@@ -469,6 +532,7 @@ class OverlayApp:
                 return
             self.settings.riot_api_key = key
             self.settings.save()
+            self.rune_lookup.stop()
             self.rune_lookup = runes.RuneLookup(key, self.settings.region,
                                                 Config.APP_DIR)
             self.rune_status = None
@@ -575,6 +639,7 @@ class OverlayApp:
             if self.demo_mode:
                 self.demo_mode = False
                 self._clear_rows()
+                self.tray.refresh()
             log.info("Match found (%d enemies).", len(enemies))
             self._build_enemy_rows(enemies)
             self._show_overlay()
@@ -595,6 +660,7 @@ class OverlayApp:
         self.game_active = False
         self.enemy_data_cache.clear()
         self.cosmic_insight.clear()
+        self.rune_lookup.stop()
         self.rune_status = None
         self._last_snapshot = None
         self._clear_rows()
@@ -712,6 +778,7 @@ class OverlayApp:
         log.info("Quitting.")
         self.settings.save()
         for name, stop in (("poller", self.game_poller.stop),
+                           ("runes", self.rune_lookup.stop),
                            ("sync", self.sync.stop),
                            ("hotkeys", self.hotkeys.stop),
                            ("typer", self.typer.stop),

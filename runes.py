@@ -1,4 +1,10 @@
-"""Optional enemy rune detection via Riot's Spectator-v5 API."""
+"""Optional enemy rune detection via Riot's Spectator-v5 API.
+
+The spectator endpoint does not know about a game the moment it starts, so a
+single lookup at match start almost always comes back empty. That looked like
+a broken API key. Instead the lookup retries on a schedule until the game
+shows up, and only gives up once it has run out of attempts.
+"""
 
 from __future__ import annotations
 import json
@@ -6,7 +12,7 @@ import logging
 import os
 import queue
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -45,6 +51,12 @@ NO_REGION = "no_region"
 NOT_FOUND = "not_found"
 FORBIDDEN = "forbidden"
 ERROR = "error"
+
+# Seconds to wait before each further attempt, so the first four minutes of a
+# game are covered. A rejected key or an unknown region will not fix itself,
+# so only these two are worth trying again.
+RETRY_DELAYS = (45, 75, 120, 180)
+RETRYABLE = frozenset({NOT_FOUND, ERROR})
 
 
 def read_lcu_region() -> Optional[str]:
@@ -119,12 +131,16 @@ class ChampionIndex:
 
 
 class RuneLookup:
-    def __init__(self, api_key: str = "", region: str = "", cache_dir: str = "."):
+    def __init__(self, api_key: str = "", region: str = "", cache_dir: str = ".",
+                 retry_delays: Tuple[int, ...] = RETRY_DELAYS):
         self.api_key = (api_key or "").strip()
         self.region = (region or "").strip()
-        self.results: "queue.Queue[Tuple[str, Dict[str, bool]]]" = queue.Queue()
+        self.retry_delays = tuple(retry_delays)
+        self.results: "queue.Queue[Tuple[str, Dict[str, bool], bool]]" = queue.Queue()
         self.champions = ChampionIndex(os.path.join(cache_dir, "champion_ids.json"))
         self._busy = threading.Lock()
+        self._stop = threading.Event()
+        self._puuid: Optional[str] = None
 
     @property
     def enabled(self) -> bool:
@@ -135,11 +151,16 @@ class RuneLookup:
             return
         if not self._busy.acquire(blocking=False):
             return
+        self._stop.clear()
         threading.Thread(
-            target=self._run, args=(players,), daemon=True
+            target=self._run, args=(players,), daemon=True, name="runes"
         ).start()
 
-    def poll(self) -> List[Tuple[str, Dict[str, bool]]]:
+    def stop(self):
+        """Abandon a retry schedule -- the match ended, or the key changed."""
+        self._stop.set()
+
+    def poll(self) -> List[Tuple[str, Dict[str, bool], bool]]:
         out = []
         while True:
             try:
@@ -151,13 +172,28 @@ class RuneLookup:
 
     def _run(self, players: List[Dict[str, str]]):
         try:
-            status, found = self._lookup(players)
-        except Exception as e:
-            log.warning(f"Lookup failed: {e}")
-            status, found = ERROR, {}
+            for attempt, delay in enumerate((0,) + self.retry_delays):
+                if delay and self._stop.wait(delay):
+                    log.debug("Rune lookup abandoned.")
+                    return
+                if self._stop.is_set():
+                    return
+
+                try:
+                    status, found = self._lookup(players)
+                except Exception as e:
+                    log.warning(f"Lookup failed: {e}")
+                    status, found = ERROR, {}
+
+                more = (status in RETRYABLE
+                        and attempt < len(self.retry_delays))
+                self.results.put((status, found, not more))
+                if not more:
+                    return
+                log.info("Runes not visible yet (%s); retrying in %ds.",
+                         status, self.retry_delays[attempt])
         finally:
             self._busy.release()
-        self.results.put((status, found))
 
     def _headers(self) -> Dict[str, str]:
         return {"X-Riot-Token": self.api_key}
@@ -169,8 +205,8 @@ class RuneLookup:
             return NO_REGION, {}
         route = PLATFORM_TO_ROUTE.get(platform, "europe")
 
-        puuid = None
-        for p in players:
+        puuid = self._puuid
+        for p in ([] if puuid else players):
             name, tag = p.get("name"), p.get("tag")
             if not name or not tag:
                 continue
@@ -185,6 +221,8 @@ class RuneLookup:
             if r.status_code == 200:
                 puuid = r.json().get("puuid")
                 if puuid:
+                    # Good across retries; only the spectator call is repeated.
+                    self._puuid = puuid
                     break
         if not puuid:
             return NOT_FOUND, {}

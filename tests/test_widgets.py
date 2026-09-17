@@ -24,6 +24,7 @@ class FakeApp:
         self.haste = haste
         self.sent = []
         self.called_out = []
+        self.ready = []
 
     def get_haste(self, champ):
         return self.haste
@@ -39,6 +40,9 @@ class FakeApp:
 
     def call_out(self, champ, spell, remaining):
         self.called_out.append((champ, spell, remaining))
+
+    def spell_ready(self, champ, spell):
+        self.ready.append((champ, spell))
 
     @property
     def kinds(self):
@@ -244,3 +248,69 @@ def test_the_widget_is_built_at_the_current_scale(root, app):
             w.destroy()
     finally:
         Config.UI_SCALE = 1.0
+
+
+# -- the audio cue -------------------------------------------------------
+
+def expire(widget):
+    """Let the cooldown run out for real, without waiting for it."""
+    widget.timer._deadline = widget.timer._clock() - 1
+    widget._tick()
+
+
+def test_a_spell_coming_back_up_asks_for_a_cue(widget, app):
+    widget.arm()
+    expire(widget)
+    assert not widget.is_active
+    assert app.ready == [("Ahri", "SummonerFlash")]
+
+
+def test_clearing_a_timer_by_hand_is_not_a_cue(widget, app):
+    """Right-click means "I was wrong", not "the spell is up"."""
+    widget.arm()
+    widget.reset()
+    assert app.ready == []
+
+
+def test_nudging_to_zero_is_not_a_cue(widget, app):
+    widget.arm()
+    widget.set_remaining(3, broadcast=False)
+    widget.nudge(-5)
+    assert app.ready == []
+
+
+def test_a_haste_correction_that_expires_a_spell_is_not_a_cue(widget, app):
+    """A correction is bookkeeping; the spell came up at some earlier point."""
+    widget.arm()
+    widget.set_remaining(250, broadcast=False)
+    widget.recalculate(500)
+    assert not widget.is_active
+    assert app.ready == []
+
+
+def test_a_partners_timer_running_out_does_cue(widget, app):
+    widget.adopt(200, 300, 0)
+    expire(widget)
+    assert app.ready == [("Ahri", "SummonerFlash")]
+
+
+# -- duplicated summoner spells -----------------------------------------
+
+def test_the_second_of_two_identical_spells_keeps_its_real_cooldown(root, app):
+    """'SummonerSmite2' is a dict key, not a spell: 15s, not the 300s default."""
+    w = SpellTimerWidget(root, "LeeSin", "SummonerSmite2", app)
+    try:
+        assert w.base_cooldown() == 15
+        w.arm()
+        assert w.remaining == 15
+    finally:
+        w.destroy()
+
+
+def test_a_duplicated_spell_still_broadcasts_under_its_own_key(root, app):
+    w = SpellTimerWidget(root, "LeeSin", "SummonerSmite2", app)
+    try:
+        w.arm()
+        assert app.sent == [("start", "LeeSin", "SummonerSmite2", 15, 15, 0)]
+    finally:
+        w.destroy()

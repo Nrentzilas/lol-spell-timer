@@ -5,8 +5,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import Config, DUPLICATE_SUFFIX, base_spell_name
 from gamedata import GameDataManager, GamePoller, MATCH_ENDED
-from config import Config
 
 
 def player(name, team, champ, s1, s2, items=(), tag=None):
@@ -203,3 +203,39 @@ def test_poll_does_not_lose_match_ended_behind_a_backlog():
     p.inbox.put({"n": 1})
     p.inbox.put(MATCH_ENDED)
     assert p.poll() is MATCH_ENDED
+
+
+# -- resolving a disambiguated duplicate --------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("SummonerSmite2", "SummonerSmite"),
+    ("SummonerFlash2", "SummonerFlash"),
+    ("SummonerFlash", "SummonerFlash"),
+    ("Unknown2", "Unknown2"),        # not a spell we know; leave it be
+    ("Unknown", "Unknown"),
+    ("", ""),
+    (None, ""),
+])
+def test_base_spell_name(raw, expected):
+    assert base_spell_name(raw) == expected
+
+
+def test_the_suffix_a_duplicate_gets_is_the_one_that_is_stripped():
+    """gamedata appends it and config strips it; they must agree."""
+    data = {
+        "activePlayer": {"summonerName": "Me", "team": "ORDER"},
+        "allPlayers": [
+            {"summonerName": "Me", "team": "ORDER"},
+            {"summonerName": "Them", "team": "CHAOS",
+             "rawChampionName": "game_character_displayname_LeeSin",
+             "summonerSpells": {
+                 "summonerSpellOne": {"rawDisplayName": "GeneratedTip_Smite"},
+                 "summonerSpellTwo": {"rawDisplayName": "GeneratedTip_Smite"}}},
+        ],
+    }
+    enemy = GameDataManager.parse_enemies(data)[0]
+    assert enemy["spell1"] == "SummonerSmite"
+    assert enemy["spell2"] == "SummonerSmite" + DUPLICATE_SUFFIX
+    # The key differs, but both resolve to the same real spell.
+    assert base_spell_name(enemy["spell2"]) == enemy["spell1"]
+    assert Config.SPELL_TIMERS[base_spell_name(enemy["spell2"]).lower()] == 15

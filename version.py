@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 APP_NAME = "Spell Timer"
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 def banner() -> str:

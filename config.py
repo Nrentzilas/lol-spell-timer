@@ -6,6 +6,26 @@ import sys
 from typing import Tuple
 
 
+# Two identical summoner spells on one enemy need telling apart as dict keys,
+# so the second gets this appended. It is not part of the spell's name.
+DUPLICATE_SUFFIX = "2"
+
+
+def base_spell_name(spell: str) -> str:
+    """The real spell behind a disambiguated duplicate.
+
+    'SummonerSmite2' is a key, not a spell: looking up its icon or its
+    cooldown by that name finds neither. Only stripped when what remains is
+    a spell we actually know, so nothing else is mangled.
+    """
+    if not spell or not spell.endswith(DUPLICATE_SUFFIX):
+        return spell or ""
+    stem = spell[:-len(DUPLICATE_SUFFIX)]
+    if stem.lower() in Config.SPELL_TIMERS:
+        return stem
+    return spell
+
+
 def resource_path(relative_path: str) -> str:
     base_path = getattr(sys, "_MEIPASS", None) or os.path.abspath(".")
     return os.path.join(base_path, relative_path)

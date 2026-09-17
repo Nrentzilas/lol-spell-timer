@@ -12,7 +12,7 @@ import tkinter as tk
 from typing import Optional, Tuple
 
 from assets import AssetManager
-from config import Config
+from config import Config, base_spell_name
 from cooldown import DEFAULT_COOLDOWN, CooldownTimer
 
 log = logging.getLogger("widgets")
@@ -68,7 +68,8 @@ class SpellTimerWidget(tk.Canvas):
         self.timer = CooldownTimer()
         self.timer_job = None
 
-        self.icon_img = AssetManager.load_icon("spells", spell_name, (size, size))
+        self.icon_img = AssetManager.load_icon(
+            "spells", base_spell_name(spell_name), (size, size))
         self.create_image(0, 0, image=self.icon_img, anchor="nw")
 
         self.dim_img = AssetManager.create_dim_layer((size, size))
@@ -94,7 +95,8 @@ class SpellTimerWidget(tk.Canvas):
         return self.timer.remaining
 
     def base_cooldown(self) -> int:
-        return Config.SPELL_TIMERS.get(self.spell_name.lower(), DEFAULT_COOLDOWN)
+        key = base_spell_name(self.spell_name).lower()
+        return Config.SPELL_TIMERS.get(key, DEFAULT_COOLDOWN)
 
     # -- events ----------------------------------------------------------
 
@@ -151,16 +153,21 @@ class SpellTimerWidget(tk.Canvas):
         self.timer.reset()
         self._stop_drawing()
 
-    def _expired(self, broadcast: bool) -> None:
+    def _expired(self, broadcast: bool, cue: bool = False) -> None:
         """Finish up after the timer has already reset itself.
 
         reset() cannot do this: by the time it is called the timer is idle, so
         it would decide there was nothing to announce and a partner would be
         left holding a cooldown we have cleared.
+
+        ``cue`` marks the spell genuinely coming back up, as opposed to being
+        cleared by hand or corrected away by a haste change.
         """
         self._stop_drawing()
         if broadcast:
             self.app_ref.broadcast_reset(self.champ_name, self.spell_name)
+        if cue:
+            self.app_ref.spell_ready(self.champ_name, self.spell_name)
 
     def set_remaining(self, remaining: int, broadcast: bool = False) -> None:
         if not self.is_active:
@@ -224,7 +231,7 @@ class SpellTimerWidget(tk.Canvas):
         remaining = self.timer.remaining
         if not self.timer.is_active or remaining <= 0:
             self.timer.reset()
-            self._expired(broadcast=False)
+            self._expired(broadcast=False, cue=True)
             return
 
         warn = remaining <= Config.WARN_THRESHOLD
