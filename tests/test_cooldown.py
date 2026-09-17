@@ -220,3 +220,33 @@ def test_set_remaining_ignores_junk(timer):
     timer.start(300)
     assert timer.set_remaining("later") is True
     assert timer.remaining == 300
+
+
+# -- float round-off -----------------------------------------------------
+
+def test_a_hair_over_a_whole_second_does_not_become_an_extra_second(timer):
+    """`(now + 254.0) - now` can exceed 254.0, and ceil() would show 255.
+
+    Reproduced by nudging the deadline directly, because whether the real
+    arithmetic overshoots depends on how long the machine has been up.
+    """
+    timer.start(300, 18)
+    assert timer.remaining == 254
+    timer._deadline += 3e-14
+    assert timer.remaining == 254
+
+
+def test_the_first_read_of_a_fresh_timer_is_its_full_duration(timer, clock):
+    for uptime in (60.0006, 60.0008, 3600.5, 5849.95):
+        clock.now = uptime
+        timer.start(300, 18)
+        assert timer.remaining == 254, f"wrong at uptime {uptime}"
+
+
+def test_a_correction_landing_exactly_on_zero_expires_the_spell(timer, clock):
+    timer.start(300, 0)
+    clock.advance(50)
+    timer._deadline += 3e-14
+    # 500 haste puts the cooldown at 50s, and 50s have gone.
+    assert timer.recalculate(500) is False
+    assert not timer.is_active

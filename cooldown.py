@@ -14,6 +14,19 @@ from typing import Callable, Optional
 # actually track and a wrong 5:00 is less misleading than a wrong 0:15.
 DEFAULT_COOLDOWN = 300
 
+# Deadline arithmetic is `now + duration`, and reading it back is
+# `deadline - now`. In floating point that round trip can land a hair *above*
+# the duration -- (60.0006 + 254.0) - 60.0006 is 254.00000000000003 -- and
+# ceil() turns 3e-14 into a whole extra second on the overlay. Whether it
+# overshoots depends on the magnitude of the clock, so it shows up on a
+# freshly booted machine and not on one that has been up for hours. Rounding
+# to microseconds first costs nothing a cooldown timer can measure.
+PRECISION = 6
+
+
+def _seconds(value: float) -> float:
+    return round(value, PRECISION)
+
 
 def apply_haste(base_cd: int, haste: int) -> int:
     """Summoner spell haste, the way League computes it."""
@@ -48,7 +61,7 @@ class CooldownTimer:
     @property
     def remaining(self) -> int:
         """Seconds left, rounded up, which is what the overlay draws."""
-        return math.ceil(self.remaining_exact)
+        return math.ceil(_seconds(self.remaining_exact))
 
     def duration(self) -> Optional[int]:
         """The full length of this cooldown, or None if it was not told."""
@@ -124,10 +137,10 @@ class CooldownTimer:
         # Clamp: a partner with a shorter view of the cooldown can hand us a
         # remaining that exceeds our own duration, which would read as
         # negative elapsed time and hand back more than a full cooldown.
-        elapsed = max(0.0, apply_haste(self.base_cd, self.haste)
-                      - self.remaining_exact)
+        elapsed = max(0.0, _seconds(apply_haste(self.base_cd, self.haste)
+                                    - self.remaining_exact))
         self.haste = new_haste
-        new_remaining = apply_haste(self.base_cd, new_haste) - elapsed
+        new_remaining = _seconds(apply_haste(self.base_cd, new_haste) - elapsed)
         if new_remaining <= 0:
             self.reset()
             return False
