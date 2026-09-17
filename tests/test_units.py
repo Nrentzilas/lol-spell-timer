@@ -13,6 +13,7 @@ import chat
 import gamedata
 import gamewindow
 import clipboardtyper
+from config import Config
 from gamedata import SpellCooldowns, GameDataManager
 
 
@@ -194,6 +195,23 @@ def test_message_without_game_clock_falls_back_to_relative():
         "Ahri Flash back in 2:45"
 
 
+def test_sub_minute_calls_are_a_countdown_not_a_clock_time():
+    assert chat.format_message("MissFortune", "SummonerFlash", 47, 720) ==         "MissFortune Flash up in 47s"
+
+
+@pytest.mark.parametrize("remaining,expected", [
+    (1, "Ahri Flash up in 1s"),
+    (59, "Ahri Flash up in 59s"),
+    (60, "Ahri Flash up at 13:00"),
+])
+def test_the_switch_happens_at_a_minute(remaining, expected):
+    assert chat.format_message("Ahri", "SummonerFlash", remaining, 720) == expected
+
+
+def test_a_countdown_does_not_need_the_game_clock():
+    assert chat.format_message("Ahri", "SummonerFlash", 47, None) ==         "Ahri Flash up in 47s"
+
+
 def test_message_when_spell_is_up():
     assert chat.format_message("Ahri", "SummonerFlash", 0, 720) == "Ahri Flash is up"
 
@@ -233,3 +251,158 @@ def test_type_text_counts_characters(monkeypatch):
                         lambda n, arr, size: calls.append(n) or 2)
     assert clipboardtyper.type_text("abc") == 3
     assert calls == [2, 2, 2]          # one SendInput of 2 events per character
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("MissFortune Flash up at 14:32", "MissFortune Flash up at 14:32"),
+    ("  padded  ", "padded"),
+    ("two\nlines", "two lines"),
+])
+def test_sanitize_flattens_to_one_line(raw, expected):
+    assert clipboardtyper.sanitize(raw)[0] == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n", None])
+def test_sanitize_rejects_nothing_to_send(raw):
+    text, err = clipboardtyper.sanitize(raw)
+    assert text == ""
+    assert err
+
+
+def test_sanitize_refuses_a_leading_slash_so_it_is_not_a_command():
+    text, err = clipboardtyper.sanitize("/remake")
+    assert text == ""
+    assert "command" in err
+
+
+def test_sanitize_caps_the_length():
+    text, err = clipboardtyper.sanitize("x" * 500)
+    assert err is None
+    assert len(text) == clipboardtyper.MAX_CHAT_LEN
+
+
+def test_send_to_chat_wraps_the_text_in_two_enters(monkeypatch):
+    events = []
+    monkeypatch.setattr(clipboardtyper, "tap", lambda vk: events.append(vk))
+    monkeypatch.setattr(clipboardtyper, "type_text",
+                        lambda t: events.append(t) or len(t))
+    monkeypatch.setattr(clipboardtyper.time, "sleep", lambda s: None)
+    assert clipboardtyper.send_to_chat("hi") == 2
+    assert events == [clipboardtyper.VK_RETURN, "hi", clipboardtyper.VK_RETURN]
+
+
+def test_send_is_ignored_while_the_feature_is_off():
+    t = clipboardtyper.ClipboardTyper()
+    assert t.send_enabled is False
+    assert t.send("MissFortune Flash is up") is False
+    assert t._pending.qsize() == 0
+
+
+def test_send_queues_sanitized_text():
+    t = clipboardtyper.ClipboardTyper(send_enabled=True)
+    assert t.send("  MissFortune  Flash is up  ") is True
+    assert t._pending.get_nowait() == ("send", "MissFortune Flash is up")
+
+
+def test_send_refuses_a_chat_command():
+    t = clipboardtyper.ClipboardTyper(send_enabled=True)
+    assert t.send("/all hello") is False
+    assert t._pending.qsize() == 0
+
+
+def test_nothing_is_typed_when_league_is_not_the_focused_window(monkeypatch):
+    t = clipboardtyper.ClipboardTyper(send_enabled=True)
+    monkeypatch.setattr(clipboardtyper.gamewindow, "find", lambda: 0)
+    monkeypatch.setattr(clipboardtyper.gamewindow, "is_foreground",
+                        lambda hwnd=None: False)
+    typed = []
+    monkeypatch.setattr(clipboardtyper, "send_to_chat", typed.append)
+    t._send("MissFortune Flash is up")
+    assert typed == []
+
+
+def test_a_focused_league_gets_the_call_out(monkeypatch):
+    t = clipboardtyper.ClipboardTyper(send_enabled=True)
+    monkeypatch.setattr(clipboardtyper.gamewindow, "find", lambda: 1234)
+    monkeypatch.setattr(clipboardtyper.gamewindow, "is_foreground",
+                        lambda hwnd=None: True)
+    typed = []
+    monkeypatch.setattr(clipboardtyper, "send_to_chat",
+                        lambda text: typed.append(text) or len(text))
+    t._send("MissFortune Flash is up")
+    assert typed == ["MissFortune Flash is up"]
+    assert t._typing is False
+
+
+# -- room codes never become the topic -----------------------------------
+
+def test_a_room_code_does_not_appear_in_its_topic():
+    topic = sync.room_topic("duo")
+    assert "duo" not in topic
+    assert topic.startswith("loltimer/v2/")
+
+
+def test_the_same_code_always_gives_the_same_topic():
+    assert sync.room_topic("duo") == sync.room_topic("  duo  ")
+
+
+def test_different_codes_give_different_topics():
+    assert sync.room_topic("duo") != sync.room_topic("duo2")
+
+
+def test_no_room_means_no_topic():
+    assert sync.room_topic("") == ""
+    assert sync.room_topic(None) == ""
+
+
+def test_a_hostile_code_cannot_reach_another_topic():
+    for hostile in ("../other", "a/#", "+", "a b", "#"):
+        topic = sync.room_topic(hostile)
+        if not topic:
+            continue
+        tail = topic[len("loltimer/v2/"):]
+        assert tail.isalnum()
+
+
+def test_the_client_derives_its_topic_from_the_room():
+    client = sync.SyncClient("duo", "broker.example", 8883)
+    assert client.topic == sync.room_topic("duo")
+    assert "duo" not in client.topic
+
+
+# -- overlay scaling -----------------------------------------------------
+
+def test_scaling_is_the_identity_at_one_x():
+    Config.UI_SCALE = 1.0
+    try:
+        assert Config.icon_size() == Config.ICON_SIZE
+        assert Config.font()[1] == Config.BASE_FONT_SIZE
+    finally:
+        Config.UI_SCALE = 1.0
+
+
+def test_scaling_grows_every_dimension_together():
+    Config.UI_SCALE = 2.0
+    try:
+        assert Config.icon_size() == Config.ICON_SIZE * 2
+        assert Config.font()[1] == Config.BASE_FONT_SIZE * 2
+        assert Config.scaled(3) == 6
+    finally:
+        Config.UI_SCALE = 1.0
+
+
+def test_a_scaled_size_is_never_zero():
+    Config.UI_SCALE = Config.UI_SCALE_MIN
+    try:
+        assert Config.scaled(1) >= 1
+        assert Config.font(-6)[1] >= 6
+    finally:
+        Config.UI_SCALE = 1.0
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (2.0, 2.0), (99, Config.UI_SCALE_MAX), (0, Config.UI_SCALE_MIN),
+    ("x", 1.0), (None, 1.0),
+])
+def test_clamp_scale(raw, expected):
+    assert Config.clamp_scale(raw) == expected

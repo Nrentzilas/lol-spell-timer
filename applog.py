@@ -31,4 +31,6 @@ def setup(log_file: str, level: int = logging.INFO) -> None:
         stream.setFormatter(formatter)
         root.addHandler(stream)
 
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Library chatter, kept out of a log people are asked to send in.
+    for noisy in ("urllib3", "PIL", "paho"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

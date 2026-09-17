@@ -1,4 +1,9 @@
-"""Types the clipboard into League's chat on Ctrl+V.
+"""Types the clipboard into League's chat, and sends call-outs outright.
+
+Two things live here. Ctrl+V in game types the clipboard out character by
+character, because League refuses a paste that came from outside it. On top of
+that, send_to_chat drives the whole exchange -- Enter, the text, Enter -- so a
+call-out needs no macro software and no second keypress.
 
 Approach from Zeunig/lol_clipboard (MIT): github.com/Zeunig/lol_clipboard
 
@@ -13,8 +18,9 @@ import ctypes
 import logging
 import queue
 import threading
+import time
 from ctypes import wintypes
-from typing import Optional
+from typing import Optional, Tuple
 
 import gamewindow
 
@@ -25,13 +31,25 @@ WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
 WM_QUIT = 0x0012
 VK_CONTROL = 0x11
+VK_SHIFT = 0x10
 VK_V = 0x56
+VK_RETURN = 0x0D
 LLKHF_INJECTED = 0x10
 CF_UNICODETEXT = 13
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_SCANCODE = 0x0008
+MAPVK_VK_TO_VSC = 0
+
+# League needs a beat to focus the chat box. Without the first delay it drops
+# the opening characters of the message; without the second it sends early.
+CHAT_OPEN_DELAY = 0.12
+CHAT_SEND_DELAY = 0.05
+
+# A guard against sending an essay, not League's own limit, which is lower.
+MAX_CHAT_LEN = 180
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -46,6 +64,8 @@ user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
 kernel32.GlobalLock.restype = ctypes.c_void_p
 kernel32.GlobalLock.argtypes = (wintypes.HANDLE,)
 kernel32.GlobalUnlock.argtypes = (wintypes.HANDLE,)
+user32.MapVirtualKeyW.restype = wintypes.UINT
+user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
 
 # Without these, lparam (a pointer) overflows a C int on 64-bit and the
 # callback raises on every keystroke that is not Ctrl+V.
@@ -122,6 +142,45 @@ def type_text(text: str) -> int:
     return done
 
 
+def _key(vk: int, up: bool) -> _INPUT:
+    scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if up else 0)
+    return _INPUT(type=INPUT_KEYBOARD,
+                  u=_INPUTUNION(ki=_KEYBDINPUT(wVk=0, wScan=scan,
+                                               dwFlags=flags, time=0,
+                                               dwExtraInfo=None)))
+
+
+def tap(vk: int) -> bool:
+    """A press and release of one key.
+
+    Scan codes rather than Unicode: Enter is not a character, and games that
+    read raw input want the scan code anyway.
+    """
+    arr = (_INPUT * 2)(_key(vk, False), _key(vk, True))
+    return _SendInput(2, arr, ctypes.sizeof(_INPUT)) == 2
+
+
+def sanitize(text: str) -> Tuple[str, Optional[str]]:
+    """One line of chat-safe text, or the reason it cannot be sent."""
+    flat = " ".join((text or "").split())
+    if not flat:
+        return "", "the clipboard was empty"
+    if flat.startswith("/"):
+        return "", "it starts with '/', which League reads as a command"
+    return flat[:MAX_CHAT_LEN], None
+
+
+def send_to_chat(text: str) -> int:
+    """Open chat, type the message, send it. Never call this from the hook."""
+    tap(VK_RETURN)
+    time.sleep(CHAT_OPEN_DELAY)
+    typed = type_text(text)
+    time.sleep(CHAT_SEND_DELAY)
+    tap(VK_RETURN)
+    return typed
+
+
 def clipboard_text() -> str:
     if not user32.OpenClipboard(None):
         return ""
@@ -143,9 +202,10 @@ def clipboard_text() -> str:
 
 
 class ClipboardTyper:
-    def __init__(self, enabled: bool = False):
+    def __init__(self, enabled: bool = False, send_enabled: bool = False):
         self.enabled = enabled
-        self._pending: "queue.Queue[bool]" = queue.Queue()
+        self.send_enabled = send_enabled
+        self._pending: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
         self._league_hwnd = 0
         self._typing = False
         self._stop = threading.Event()
@@ -176,7 +236,7 @@ class ClipboardTyper:
         self._hook_thread = self._work_thread = None
 
     def _callback(self, code, wparam, lparam):
-        if code != 0 or not self.enabled:
+        if code != 0 or not (self.enabled or self.send_enabled):
             return user32.CallNextHookEx(None, code, wparam, lparam)
         if wparam != WM_KEYDOWN and wparam != WM_SYSKEYDOWN:
             return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -190,27 +250,71 @@ class ClipboardTyper:
             return user32.CallNextHookEx(None, code, wparam, lparam)
         if not self._league_hwnd or user32.GetForegroundWindow() != self._league_hwnd:
             return user32.CallNextHookEx(None, code, wparam, lparam)
-        self._pending.put(True)
+        if user32.GetAsyncKeyState(VK_SHIFT) & 0x8000:
+            if not self.send_enabled:
+                return user32.CallNextHookEx(None, code, wparam, lparam)
+            self._pending.put(("send", None))
+            return 1
+        if not self.enabled:
+            return user32.CallNextHookEx(None, code, wparam, lparam)
+        self._pending.put(("paste", None))
         return 1
+
+    def send(self, text: str) -> bool:
+        """Queue a chat send. Safe from the UI thread: it does not block."""
+        if not self.send_enabled:
+            return False
+        clean, err = sanitize(text)
+        if err:
+            log.info("Not sent: %s", err)
+            return False
+        self._pending.put(("send", clean))
+        return True
 
     def _worker(self):
         while not self._stop.is_set():
             try:
-                self._pending.get(timeout=0.5)
+                kind, payload = self._pending.get(timeout=0.5)
             except queue.Empty:
                 self._league_hwnd = gamewindow.find()
                 continue
-            text = clipboard_text()
-            if not text:
-                log.info("Ctrl+V caught but the clipboard was empty.")
-                continue
-            self._typing = True
-            try:
-                typed = type_text(text)
-            finally:
-                self._typing = False
-            log.info("Ctrl+V caught, typed %d of %d characters.",
-                     typed, len(text))
+            if kind == "paste":
+                self._paste()
+            else:
+                self._send(payload)
+
+    def _paste(self):
+        text = clipboard_text()
+        if not text:
+            log.info("Ctrl+V caught but the clipboard was empty.")
+            return
+        self._typing = True
+        try:
+            typed = type_text(text)
+        finally:
+            self._typing = False
+        log.info("Ctrl+V caught, typed %d of %d characters.", typed, len(text))
+
+    def _send(self, text: Optional[str]):
+        if text is None:
+            text, err = sanitize(clipboard_text())
+            if err:
+                log.info("Not sent: %s", err)
+                return
+        # Checked again here rather than trusted from the caller: a click can
+        # queue this while League sits behind another window, and the Enter
+        # that opens chat would land in that window instead.
+        self._league_hwnd = gamewindow.find()
+        if not gamewindow.is_foreground(self._league_hwnd):
+            log.info("Not sent, League is not the focused window: %s", text)
+            return
+        self._typing = True
+        try:
+            typed = send_to_chat(text)
+        finally:
+            self._typing = False
+        log.info("Sent to chat: %s (%d of %d characters).",
+                 text, typed, len(text))
 
     def _run_hook(self):
         self._tid = kernel32.GetCurrentThreadId()
@@ -220,7 +324,7 @@ class ClipboardTyper:
             log.warning("Keyboard hook could not be installed (error %d).",
                         kernel32.GetLastError())
             return
-        log.info("Clipboard typer active: Ctrl+V in game types the clipboard.")
+        log.info("Clipboard hook active (Ctrl+V types, Ctrl+Shift+V sends).")
         msg = wintypes.MSG()
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import sys
+from typing import Tuple
 
 
 def resource_path(relative_path: str) -> str:
@@ -46,6 +47,13 @@ class Config:
     ROW_PADDING_Y = 6
     SHOW_SEPARATOR = True
 
+    # Multiplier on every pixel size below. 38px icons disappear on a 4K
+    # screen, so this is adjustable from the tray menu.
+    UI_SCALE = 1.0
+    UI_SCALE_CHOICES = (1.0, 1.25, 1.5, 2.0)
+    UI_SCALE_MIN = 0.75
+    UI_SCALE_MAX = 3.0
+
     COLOR_BG = "#091428"
     COLOR_BORDER = "#463714"
     COLOR_SEPARATOR = "#000000"
@@ -80,4 +88,31 @@ class Config:
     DEFAULT_HOTKEY_MOD = "alt"
 
     SYNC_BROKER = "broker.hivemq.com"
+    # The default broker speaks plain MQTT only -- it does not answer a TLS
+    # handshake on 8883. Point `broker`/`broker_port` in config.json at a
+    # broker that does and the connection is encrypted automatically.
     SYNC_PORT = 1883
+    SYNC_TLS_PORT = 8883
+    SYNC_PLAIN_PORT = 1883
+
+    @classmethod
+    def scaled(cls, value: float) -> int:
+        """A pixel size at the current overlay scale."""
+        return max(1, int(round(value * cls.UI_SCALE)))
+
+    @classmethod
+    def icon_size(cls) -> int:
+        return cls.scaled(cls.ICON_SIZE)
+
+    @classmethod
+    def font(cls, delta: int = 0, weight: str = "bold") -> Tuple[str, int, str]:
+        size = max(6, cls.scaled(cls.BASE_FONT_SIZE + delta))
+        return (cls.FONT_FAMILY, size, weight)
+
+    @classmethod
+    def clamp_scale(cls, value: float) -> float:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(cls.UI_SCALE_MIN, min(cls.UI_SCALE_MAX, round(value, 2)))

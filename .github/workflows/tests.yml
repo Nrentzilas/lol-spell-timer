@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Windows-only by nature: the overlay is built on ctypes.windll.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Import every module
+        # The UI modules have no unit tests, so this is what catches a broken
+        # import graph after a refactor.
+        run: >
+          python -c "import applog, assets, chat, clipboardtyper, config,
+          cooldown, dialogs, download_assets, gamedata, gamewindow, hotkeys,
+          main, runes, settings, sync, tray, version, widgets, win32util;
+          print('imports ok')"
+
+      - name: Run tests
+        run: python -m pytest tests -q

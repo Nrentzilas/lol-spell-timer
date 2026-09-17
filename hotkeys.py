@@ -5,7 +5,6 @@ import ctypes
 import logging
 import queue
 import threading
-import time
 from ctypes import wintypes
 from typing import List, Optional, Tuple
 
@@ -18,7 +17,7 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
 WM_HOTKEY = 0x0312
-PM_REMOVE = 0x0001
+WM_QUIT = 0x0012
 
 NAME_TO_MOD = {
     "alt": MOD_ALT,
@@ -57,14 +56,23 @@ def describe(spec: str) -> str:
 
 
 class HotkeyManager:
+    """Registers the hotkeys and pumps their messages on one dedicated thread.
+
+    RegisterHotKey delivers WM_HOTKEY to the thread that registered, so the
+    registration, the message loop and the cleanup all have to happen there.
+    The loop blocks in GetMessage and is woken by a posted WM_QUIT rather than
+    polling, which is both cheaper and immediate.
+    """
+
     def __init__(self, spec: str = ""):
         self.spec = spec or ""
         self.mods, self.error = parse_modifier(self.spec)
         self.events: "queue.Queue[Tuple[int, int]]" = queue.Queue()
         self.registered: List[int] = []
         self.failed: List[str] = []
-        self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._ready = threading.Event()
+        self._tid = 0
 
     @property
     def enabled(self) -> bool:
@@ -73,17 +81,29 @@ class HotkeyManager:
     def start(self):
         if not self.enabled:
             if self.spec:
-                log.warning(f"Disabled: {self.error}.")
+                log.warning("Disabled: %s.", self.error)
             return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        if self._thread:
+            return
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="hotkeys")
         self._thread.start()
 
     def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=1.5)
+        thread = self._thread
+        if not thread:
+            return
+        # The loop is blocked in GetMessage; a thread message wakes it.
+        self._ready.wait(timeout=1.0)
+        if self._tid:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+            except Exception:
+                pass
+        thread.join(timeout=1.5)
         self._thread = None
+        self._tid = 0
 
     def poll(self) -> List[Tuple[int, int]]:
         out = []
@@ -94,11 +114,9 @@ class HotkeyManager:
                 break
         return out
 
-
-    def _run(self):
-        user32 = ctypes.windll.user32
+    def _register_all(self, user32) -> None:
         for slot in range(SLOTS):
-            vk = 0x31 + slot
+            vk = 0x31 + slot          # '1'..'5'
             for spell in (0, 1):
                 hk_id = BASE_ID + slot * 2 + spell
                 mods = self.mods | MOD_NOREPEAT | (MOD_SHIFT if spell else 0)
@@ -108,23 +126,35 @@ class HotkeyManager:
                     combo = f"{self.spec}{'+shift' if spell else ''}+{slot + 1}"
                     self.failed.append(combo)
 
-        if self.failed:
-            log.warning(f"Already taken by another app, skipped: {', '.join(self.failed)}")
-        if not self.registered:
-            log.warning("Nothing could be registered.")
-            return
-        log.info(f"{len(self.registered)} bound ({describe(self.spec)}, "
-                 f"add Shift for the second spell).")
+    def _run(self):
+        user32 = ctypes.windll.user32
+        self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        try:
+            self._register_all(user32)
+
+            if self.failed:
+                log.warning("Already taken by another app, skipped: %s",
+                            ", ".join(self.failed))
+            if not self.registered:
+                log.warning("Nothing could be registered.")
+                return
+            log.info("%d bound (%s, add Shift for the second spell).",
+                     len(self.registered), describe(self.spec))
+        finally:
+            # Released even on an early return, so stop() never blocks on a
+            # thread that has already given up.
+            self._ready.set()
 
         msg = wintypes.MSG()
         try:
-            while not self._stop.is_set():
-                while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
-                    if msg.message == WM_HOTKEY:
-                        offset = int(msg.wParam) - BASE_ID
-                        if 0 <= offset < SLOTS * 2:
-                            self.events.put((offset // 2, offset % 2))
-                time.sleep(0.02)
+            while True:
+                got = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if got in (0, -1):      # WM_QUIT, or the queue went bad
+                    break
+                if msg.message == WM_HOTKEY:
+                    offset = int(msg.wParam) - BASE_ID
+                    if 0 <= offset < SLOTS * 2:
+                        self.events.put((offset // 2, offset % 2))
         finally:
             for hk_id in self.registered:
                 try:

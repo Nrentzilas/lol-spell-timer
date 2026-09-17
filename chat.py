@@ -8,6 +8,11 @@ from gamedata import format_clock
 
 log = logging.getLogger("chat")
 
+# Under a minute, a countdown reads faster than a clock time: you know whether
+# to go now without doing the arithmetic. Above it, the clock wins, because the
+# message stays true however long the call-out sits before it is sent.
+COUNTDOWN_THRESHOLD = 60
+
 SPELL_LABELS = {
     "SummonerFlash": "Flash",
     "SummonerTeleport": "TP",
@@ -43,6 +48,8 @@ def format_message(champ: str, spell: str, remaining: int,
     champ = champ or "Enemy"
     if not remaining or remaining <= 0:
         return f"{champ} {label} is up"
+    if remaining < COUNTDOWN_THRESHOLD:
+        return f"{champ} {label} up in {int(remaining)}s"
     if game_time is not None:
         return f"{champ} {label} up at {format_clock(game_time + remaining)}"
     return f"{champ} {label} back in {format_clock(remaining)}"
