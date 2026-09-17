@@ -43,6 +43,11 @@ desktop.ini
 # Logs
 *.log
 
+# Generated at runtime
+spell_timer.log*
+spell_cooldowns.json
+champion_ids.json
+
 # Assets
 assets/
 
