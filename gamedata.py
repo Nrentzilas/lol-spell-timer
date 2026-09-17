@@ -182,6 +182,19 @@ class GameDataManager:
                 return p
         return "Unknown"
 
+    @staticmethod
+    def game_time(data: Optional[Dict]) -> Optional[float]:
+        try:
+            raw = ((data or {}).get("gameData") or {}).get("gameTime")
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+
+def format_clock(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
 
 class GamePoller:
     def __init__(self, interval: float = None, timeout: float = None,
