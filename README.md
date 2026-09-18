@@ -161,7 +161,12 @@ pull down whatever timers are already running. Leave the code empty to turn it o
 > remaining are sent.
 >
 > To encrypt it, point `broker` and `broker_port` in `config.json` at a broker
-> that does TLS; port 8883 turns it on. `broker.hivemq.com` does not offer TLS.
+> that does TLS; port 8883 turns it on. The default, `broker.emqx.io`, does:
+> set `"broker_port": 8883` and leave the broker alone.
+>
+> Before 1.4.1 the default was `broker.hivemq.com`, which now drops every
+> connection. A config.json that still names it is moved to the new default on
+> startup, but both of you need 1.4.1 to end up on the same broker.
 >
 > Both of you need 1.3.0 or newer. Older versions use a different channel and
 > will not see you.

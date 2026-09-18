@@ -85,7 +85,7 @@ class Settings:
             s.y = data.get("y", s.y)
             s.pinned = bool(data.get("pinned", False))
             s.room = sync.sanitize_room(data.get("room", ""))
-            s.broker = (data.get("broker") or Config.SYNC_BROKER).strip()
+            s.broker = cls._broker(data.get("broker"))
             s.broker_port = cls._port(data.get("broker_port"), s.broker)
             s.riot_api_key = (data.get("riot_api_key") or "").strip()
             s.region = (data.get("region") or "").strip()
@@ -97,6 +97,14 @@ class Settings:
 
         s.x, s.y = clamp_to_screen(s.x, s.y)
         return s
+
+    @staticmethod
+    def _broker(raw: Any) -> str:
+        broker = (raw or "").strip() or Config.SYNC_BROKER
+        if broker.lower() in Config.RETIRED_BROKERS:
+            log.info("Broker %s is retired; using %s.", broker, Config.SYNC_BROKER)
+            return Config.SYNC_BROKER
+        return broker
 
     @staticmethod
     def _port(raw: Any, broker: str) -> int:

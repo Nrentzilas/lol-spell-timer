@@ -107,10 +107,13 @@ class Config:
 
     DEFAULT_HOTKEY_MOD = "alt"
 
-    SYNC_BROKER = "broker.hivemq.com"
-    # The default broker speaks plain MQTT only -- it does not answer a TLS
-    # handshake on 8883. Point `broker`/`broker_port` in config.json at a
-    # broker that does and the connection is encrypted automatically.
+    SYNC_BROKER = "broker.emqx.io"
+    # Former defaults. They were written into every config.json, so a saved
+    # value naming one of these means "the default", not a choice. HiveMQ's
+    # public broker started resetting every connection in September 2026.
+    RETIRED_BROKERS = ("broker.hivemq.com",)
+    # The default is used in plain MQTT on 1883. It also answers TLS on 8883;
+    # set `broker_port` to 8883 in config.json and the connection is encrypted.
     SYNC_PORT = 1883
     SYNC_TLS_PORT = 8883
     SYNC_PLAIN_PORT = 1883

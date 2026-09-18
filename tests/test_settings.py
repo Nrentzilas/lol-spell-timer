@@ -111,11 +111,25 @@ def test_ui_scale_is_clamped(path, raw, expected):
 # -- the broker ----------------------------------------------------------
 
 def test_the_default_broker_is_used_in_the_clear(path):
-    """broker.hivemq.com does not answer a TLS handshake; do not pretend."""
+    """The default is used in the clear unless the port asks for TLS."""
     s = Settings.load(path)
     assert s.broker == Config.SYNC_BROKER
     assert s.broker_port == Config.SYNC_PLAIN_PORT
     assert s.sync_tls is False
+
+
+def test_the_retired_default_broker_moves_to_the_new_one(path):
+    """Every old config.json saved broker.hivemq.com; it now drops connections."""
+    write(path, {"broker": "broker.hivemq.com", "broker_port": 1883, "room": "duo"})
+    s = Settings.load(path)
+    assert s.broker == Config.SYNC_BROKER
+    assert s.broker_port == 1883
+    assert s.room == "duo"
+
+
+def test_a_broker_the_user_chose_is_kept(path):
+    write(path, {"broker": "mqtt.example.org"})
+    assert Settings.load(path).broker == "mqtt.example.org"
 
 
 def test_pointing_at_8883_turns_on_tls(path):

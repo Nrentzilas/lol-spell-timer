@@ -122,7 +122,12 @@ class SyncClient:
 
     def _on_disconnect(self, client, userdata, rc, *args):
         self.connected = False
-        log.warning("Disconnected (will retry).")
+        if rc == 0:
+            log.info("Disconnected.")
+            return
+        # Without the reason, a broker that refuses us reads like a code bug.
+        log.warning("Disconnected from %s: %s (will retry).", self.broker,
+                    mqtt.error_string(rc) if isinstance(rc, int) else rc)
 
     def _on_message(self, client, userdata, msg):
         try:
