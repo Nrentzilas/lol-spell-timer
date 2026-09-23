@@ -37,6 +37,9 @@ MSG_HELLO = "hello"
 MSG_STATE = "state"
 MSG_CI = "ci"
 MSG_ADJUST = "adjust"
+# Local only, never published: the link just came up. Timers started while it
+# was down were dropped (QoS 0), so the app answers by resending its state.
+MSG_CONNECTED = "connected"
 
 
 def sanitize_room(room: Optional[str]) -> str:
@@ -119,6 +122,7 @@ class SyncClient:
         client.subscribe(self.topic, qos=0)
         log.info("Connected, room '%s' is live.", self.room)
         self.publish(MSG_HELLO, {})
+        self.inbox.put({"type": MSG_CONNECTED})
 
     def _on_disconnect(self, client, userdata, rc, *args):
         self.connected = False

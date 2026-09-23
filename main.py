@@ -309,7 +309,7 @@ class OverlayApp:
             if champ:
                 self.set_cosmic_insight(champ, bool(msg.get("on")), broadcast=False)
 
-        elif kind == sync.MSG_HELLO:
+        elif kind in (sync.MSG_HELLO, sync.MSG_CONNECTED):
             self._send_state()
 
         elif kind == sync.MSG_STATE:

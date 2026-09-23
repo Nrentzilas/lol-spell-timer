@@ -370,6 +370,19 @@ def test_the_client_derives_its_topic_from_the_room():
     assert "duo" not in client.topic
 
 
+def test_coming_online_asks_the_app_to_resend_its_timers():
+    """Anything started while the link was down was dropped; resend on connect."""
+    client = sync.SyncClient("duo", "broker.example")
+
+    class FakeMqtt:
+        def subscribe(self, *a, **k):
+            pass
+
+    client._on_connect(FakeMqtt(), None, {}, 0)
+    assert client.connected
+    assert [m["type"] for m in client.poll()] == [sync.MSG_CONNECTED]
+
+
 # -- overlay scaling -----------------------------------------------------
 
 def test_scaling_is_the_identity_at_one_x():
