@@ -25,6 +25,7 @@ class FakeApp:
         self.settings = Settings.load(path)
         self.demo_mode = False
         self.game_active = False
+        self.update_available = None
         self.queued = []
 
     # the properties the menu's predicates go through

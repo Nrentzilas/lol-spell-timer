@@ -18,6 +18,7 @@ import queue
 import signal
 import sys
 import tkinter as tk
+import webbrowser
 from typing import Any, Dict, List, Optional, Tuple
 
 import urllib3
@@ -32,6 +33,7 @@ import runes
 import sound
 import sync
 import tray as tray_module
+import updates
 from config import Config
 from assets import AssetManager
 from gamedata import MATCH_ENDED, GameDataManager, GamePoller, SpellCooldowns
@@ -129,6 +131,7 @@ class OverlayApp:
         self._last_snapshot: Optional[Dict] = None
         self._last_handle_state = None
         self._shutting_down = False
+        self.update_available: Optional[Dict[str, str]] = None
         self._drag_data = {"x": 0, "y": 0}
 
         self.rune_lookup = runes.RuneLookup(settings.riot_api_key,
@@ -154,6 +157,10 @@ class OverlayApp:
         self.dialogs = dialogs.DialogHost(self.root)
         self.tray = tray_module.Tray(self.request, self)
         self.tray.run_detached()
+
+        # After the tray exists, since that is where the answer is shown.
+        self.updates = updates.UpdateChecker(enabled=settings.check_updates)
+        self.updates.start()
 
         signal.signal(signal.SIGINT, self._on_signal)
 
@@ -386,6 +393,9 @@ class OverlayApp:
         for slot, spell_idx in self.hotkeys.poll():
             self._fire_hotkey(slot, spell_idx)
 
+        for release in self.updates.poll():
+            self._on_update_found(release)
+
         while True:
             try:
                 name, value = self._actions.get_nowait()
@@ -443,6 +453,7 @@ class OverlayApp:
             tray_module.TOGGLE_DEMO: self._toggle_demo,
             tray_module.TOGGLE_SOUND: self._toggle_sound_cue,
             tray_module.OPEN_LOG: self._open_log,
+            tray_module.OPEN_UPDATE: self._open_update_page,
             tray_module.QUIT: self._shutdown,
         }
         if name == tray_module.SCALE:
@@ -480,6 +491,27 @@ class OverlayApp:
             os.startfile(Config.LOG_FILE)       # noqa: S606 - Windows only
         except Exception as e:
             log.warning("Could not open the log file: %s", e)
+
+    def _on_update_found(self, release: Dict[str, str]) -> None:
+        self.update_available = release
+        self.tray.refresh()
+        version = release["version"]
+        # The menu item stays for the whole session; the pop-up is once per
+        # version, and never over a running match.
+        if self.game_active or self.settings.update_notified == version:
+            return
+        self.settings.update_notified = version
+        self.settings.save()
+        self.tray.notify(f"{APP_NAME} {version} is out",
+                         f"You have {__version__}. Pick \"Update available\" "
+                         "in the tray menu to download it.")
+
+    def _open_update_page(self) -> None:
+        url = (self.update_available or {}).get("url") or updates.RELEASES_PAGE
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            log.warning("Could not open %s: %s", url, e)
 
     def _apply_scale(self) -> None:
         """Draw at the size the menu already reports."""

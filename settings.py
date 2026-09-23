@@ -59,6 +59,10 @@ class Settings:
     send_callouts: bool = False
     sound_cue: bool = False
     ui_scale: float = 1.0
+    check_updates: bool = True
+    # The newest release already announced, so the pop-up is shown once per
+    # version rather than on every launch.
+    update_notified: str = ""
     path: str = field(default=Config.CONFIG_FILE, repr=False)
 
     @property
@@ -94,6 +98,8 @@ class Settings:
             s.send_callouts = bool(data.get("send_callouts", False))
             s.sound_cue = bool(data.get("sound_cue", False))
             s.ui_scale = Config.clamp_scale(data.get("ui_scale", 1.0))
+            s.check_updates = bool(data.get("check_updates", True))
+            s.update_notified = str(data.get("update_notified") or "").strip()
 
         s.x, s.y = clamp_to_screen(s.x, s.y)
         return s
@@ -132,6 +138,8 @@ class Settings:
             "send_callouts": bool(self.send_callouts),
             "sound_cue": bool(self.sound_cue),
             "ui_scale": float(self.ui_scale),
+            "check_updates": bool(self.check_updates),
+            "update_notified": self.update_notified,
         }
 
     def save(self) -> bool:

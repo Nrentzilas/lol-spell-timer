@@ -35,7 +35,7 @@ jobs:
         run: >
           python -c "import applog, assets, chat, clipboardtyper, config,
           cooldown, dialogs, download_assets, gamedata, gamewindow, hotkeys,
-          main, runes, settings, sync, tray, version, widgets, win32util;
+          main, runes, settings, sync, tray, updates, version, widgets, win32util;
           print('imports ok')"
 
       - name: Run tests

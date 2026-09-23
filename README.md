@@ -21,6 +21,9 @@ to set up per match. Start a game and five rows appear.
 - **Scroll to correct.** Nudge a running timer by 5s when you clicked late.
 - **Sizeable.** Pick an overlay size in the tray menu if 4K makes it tiny.
 - **Optional beep** when a tracked spell comes back up, for when you are looking at the game.
+- **Update notice.** On launch it checks GitHub for a newer release and adds a
+  download link to the tray menu. Nothing is installed for you. Set
+  `"check_updates": false` in `config.json` to skip the check.
 
 ## Install
 

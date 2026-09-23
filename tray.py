@@ -29,6 +29,7 @@ TOGGLE_SOUND = "toggle_sound"
 OPEN_LOG = "open_log"
 QUIT = "quit"
 SCALE = "scale"
+OPEN_UPDATE = "open_update"
 
 
 def _load_image() -> Image.Image:
@@ -76,6 +77,9 @@ class Tray:
 
     def _build_menu(self) -> pystray.Menu:
         return pystray.Menu(
+            # Hidden until the update check finds something.
+            pystray.MenuItem(self._update_label, self._act(OPEN_UPDATE),
+                             visible=lambda _i: bool(self.state.update_available)),
             pystray.MenuItem("Duo Sync / Room Code...", self._act(ROOM)),
             pystray.MenuItem("Riot API Key (rune auto-detect)...", self._act(APIKEY)),
             pystray.MenuItem("Hotkeys...", self._act(HOTKEYS)),
@@ -99,6 +103,10 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._act(QUIT)),
         )
+
+    def _update_label(self, _item) -> str:
+        release = self.state.update_available or {}
+        return f"Update available: v{release.get('version', '?')} (download)"
 
     def run_detached(self) -> None:
         """Start the tray on its own thread."""
